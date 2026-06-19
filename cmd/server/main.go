@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/car"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/consumer"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/handler"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/producer"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/repository"
@@ -38,10 +40,20 @@ func main() {
 		Topic:   "car-commands",
 	})
 
+	kafkaReader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{"localhost:9092"},
+		Topic:   "car-commands",
+		GroupID: "car-command-consumer",
+	})
+
 	commandRepository := repository.NewPostgresCommandRepository(pool)
 	commandPublisher := producer.NewKafkaPublisher(kafkaWriter)
 	commandService := service.NewCommandService(commandRepository, commandPublisher)
 	commandHandler := handler.NewCommandHandler(commandService)
+
+	carSimulator := car.NewCarSimulator(0)
+	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator)
+	commandConsumer.Start(ctx)
 
 	r := chi.NewRouter()
 
@@ -78,6 +90,10 @@ func main() {
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("server shutdown error: %v", err)
+	}
+
+	if err := kafkaReader.Close(); err != nil {
+		log.Printf("kafka reader close error: %v", err)
 	}
 
 	if err := kafkaWriter.Close(); err != nil {

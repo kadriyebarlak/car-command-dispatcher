@@ -13,6 +13,8 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka_data:/var/lib/kafka/data
   postgres:
     image: postgres:16
     environment:
@@ -26,3 +28,4 @@ services:
 
 volumes:
   postgres_data:
+  kafka_data:

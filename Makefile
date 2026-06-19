@@ -1,6 +1,12 @@
 run:
 	go run ./cmd/server
 
+build:
+	go build -o bin/server ./cmd/server
+
+check:
+	go build ./...
+
 kafka-topic:
 	docker-compose exec kafka kafka-topics \
 		--bootstrap-server localhost:9092 \
