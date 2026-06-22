@@ -52,6 +52,17 @@ func (c *Consumer) process(ctx context.Context, msg kafka.Message) {
 
 	log.Printf("consumer: received command id=%s car_id=%s type=%s", command.ID, command.CarID, command.Type)
 
+	firstTime, err := c.repository.MarkProcessed(ctx, command.ID)
+	if err != nil {
+		log.Printf("consumer: failed to mark command %s as processed: %v", command.ID, err)
+		return
+	}
+
+	if !firstTime {
+		log.Printf("consumer: duplicate command %s, skipping", command.ID)
+		return
+	}
+
 	if err := c.repository.UpdateStatus(ctx, command.ID, domain.CommandStatusSent); err != nil {
 		log.Printf("consumer: failed to update status to SENT for command %s: %v", command.ID, err)
 		return

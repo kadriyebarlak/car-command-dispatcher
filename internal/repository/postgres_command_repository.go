@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"errors"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
 )
@@ -34,6 +36,23 @@ func (r *PostgresCommandRepository) UpdateStatus(ctx context.Context, id string,
 		status, id,
 	)
 	return err
+}
+
+func (r *PostgresCommandRepository) MarkProcessed(ctx context.Context, commandID string) (bool, error) {
+	_, err := r.pool.Exec(ctx,
+		"INSERT INTO processed_commands (command_id) VALUES ($1)",
+		commandID,
+	)
+	if err == nil {
+		return true, nil
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return false, nil
+	}
+
+	return false, err
 }
 
 var _ domain.CommandRepository = (*PostgresCommandRepository)(nil)

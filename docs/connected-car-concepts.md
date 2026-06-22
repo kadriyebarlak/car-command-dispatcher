@@ -165,3 +165,5 @@ _to be added — read the AWS "making retries safe with idempotent APIs" article
 ## Concept 5 — Retry, timeouts, backoff with jitter (Day 6)
 
 _to be added — read the AWS "timeouts, retries and backoff with jitter" article before this day_
+
+docker-compose exec postgres psql -U notify -d car_commands -c "\dt"
