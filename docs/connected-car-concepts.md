@@ -278,6 +278,111 @@ system also adds a sweeper to find commands stuck in an intermediate state and r
 
 ---
 
-## Concept 5 — Retry, timeouts, backoff with jitter (Day 6)
+## Concept 5 — At-least-once delivery, and how it fights idempotency
+
+### The switch: ReadMessage → FetchMessage + CommitMessages
+
+`ReadMessage` auto-commits the offset the instant it returns a message — before any
+processing. Crash mid-process → Kafka thinks it was handled → never redelivered →
+**at-most-once** → commands can vanish.
+
+`FetchMessage` does not commit. You process first, then call `CommitMessages` only
+after the outcome is durably recorded → **at-least-once** → crash before commit means
+Kafka redelivers → no lost command.
+
+```
+at-least-once delivery  →  no lost commands (Kafka redelivers on crash)
+idempotency check       →  redelivery does not execute twice
+together                →  effectively exactly-once
+```
+
+### The key rule — what "commit" means
+
+> Committing the offset means "I durably recorded what happened to this message" —
+> NOT "the command succeeded."
+
+| Outcome | Recorded? | Commit? |
+|---|---|---|
+| Car acknowledged → ACKNOWLEDGED | yes | commit |
+| Car offline → FAILED | yes (a retry layer re-drives it later) | commit |
+| DB write itself failed (could not record anything) | no | do NOT commit → redeliver |
+| Malformed message (will never parse) | n/a | commit (see poison messages) |
+
+So `process` returns an error only when an *infrastructure* operation stopped it from
+recording an outcome. A car being offline is an outcome, not an infrastructure failure.
+
+### Poison messages
+
+A message that can never be processed (e.g. malformed JSON that fails `Unmarshal` every
+time). If you skip the commit on it, Kafka redelivers it forever → infinite loop → the
+consumer is stuck and no other messages flow. This is a **poison message** (poison pill).
+
+- Quick fix (this project): `return nil` on unmarshal failure so the offset commits and
+  the consumer moves on.
+- Production fix: publish the bad message to a **dead-letter queue** (`car-commands-dlq`)
+  *then* commit — preserves it for inspection instead of silently dropping it.
+
+> Interview phrasing: "I commit past poison messages to avoid an infinite redelivery loop,
+> and in production I'd route them to a dead-letter queue rather than dropping them."
+
+### The bug: idempotency claim fights at-least-once redelivery
+
+A real flaw in the simple design, found by tracing the failure path:
+
+```
+1. MarkProcessed inserts command_id    → claimed
+2. UpdateStatus(SENT) fails             → process returns error
+3. offset NOT committed                 → Kafka redelivers
+4. redelivery: MarkProcessed → false    → "duplicate, skip"
+5. command claimed but never sent       → LOST
+```
+
+The redelivery that should retry is blocked by your own idempotency claim. The two
+mechanisms fight each other. Root cause: `MarkProcessed` is a **claim**, not **proof** —
+the command is marked "seen" before the work is confirmed done.
+
+### Two fixes
+
+**Fix 1 — transaction around the DB writes.**
+Put `MarkProcessed` and `UpdateStatus(SENT)` in one transaction: either both commit or
+both roll back. A failure rolls back the claim, so redelivery genuinely retries.
+Limitation: a transaction can only cover *database* writes. It cannot include `Car.Send`
+(external system, over the network), so the claim-vs-actually-sent gap remains — this is
+the dual-write problem again. A transaction shrinks the window; it does not close it.
+
+**Fix 2 — state-bearing idempotency record (the stronger pattern).**
+Give `processed_commands` a state instead of a binary seen/not-seen:
+
+```
+PROCESSING  — claimed, work not yet confirmed done
+DONE        — work confirmed complete
+```
+
+On redelivery, a row in `PROCESSING` means "claimed but maybe unfinished → retry",
+NOT "skip". Only `DONE` means skip.
+
+```
+First delivery:           insert PROCESSING → do work → update DONE
+Crash after claim:        row stuck in PROCESSING
+Redelivery:               sees PROCESSING (not DONE) → retries instead of skipping
+```
+
+Production systems combine: state-bearing record + transaction around DB writes +
+operation idempotent on the receiving side (the car ignores a true duplicate). Together
+these get genuinely close to exactly-once.
+
+### Scope note for this project
+
+The simple binary claim is kept here, with the limitation documented. Finding and
+explaining the flaw matters more than a perfect implementation.
+
+> Interview phrasing: "My first idempotency design had a gap — a failure between claiming
+> and doing the work would block redelivery from retrying. The fix is a state-bearing
+> idempotency record plus a transaction around the database writes, though the external
+> car call still can't be made fully atomic — that's the dual-write problem."
+
+---
+
+## Concept 6 — Retry, timeouts, backoff with jitter (Day 7)
 
 _to be added — read the AWS "timeouts, retries and backoff with jitter" article before this day_
