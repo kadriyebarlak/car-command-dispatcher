@@ -52,7 +52,7 @@ func main() {
 	commandHandler := handler.NewCommandHandler(commandService)
 
 	carSimulator := car.NewCarSimulator(0)
-	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator)
+	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second)
 	commandConsumer.Start(ctx)
 
 	r := chi.NewRouter()

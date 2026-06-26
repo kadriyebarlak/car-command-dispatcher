@@ -6,7 +6,7 @@ tracking, worker pool, graceful shutdown, table-driven tests) are not repeated h
 see that project's `docs/learning/` for those.
 
 This file covers only what is new: asynchronous acknowledgement, Kafka, partition
-ordering, idempotency, and retry/backoff.
+ordering, idempotency, at-least-once delivery, and retry/backoff.
 
 ---
 
@@ -383,6 +383,158 @@ explaining the flaw matters more than a perfect implementation.
 
 ---
 
-## Concept 6 — Retry, timeouts, backoff with jitter (Day 7)
+## Concept 6 — Timeouts, retry, and backoff with jitter
 
-_to be added — read the AWS "timeouts, retries and backoff with jitter" article before this day_
+### Three separate concerns, often confused
+
+| Concept | Question it answers |
+|---|---|
+| **Timeout** | how long to wait for ONE attempt before calling it failed |
+| **Backoff** | how long to wait BETWEEN attempts |
+| **Retry / max** | how many attempts before giving up (→ DEAD) |
+
+These are independent. You need all three.
+
+### Timeout — bounding a single car call
+
+A real car might hang and never respond. Without a deadline, that one call blocks the
+consumer forever — and since one partition is processed one message at a time, the whole
+pipeline for that car stalls.
+
+```go
+sendCtx, cancel := context.WithTimeout(ctx, c.sendTimeout)
+err = c.car.Send(sendCtx, command)
+cancel()  // called immediately after the call, not deferred
+```
+
+- The timeout wraps ONLY the car call, not the surrounding DB writes.
+- `cancel()` is called right after the call returns, to release resources promptly.
+- A timeout is treated as a failure → status FAILED → the retry layer re-drives it.
+
+### Testing a timeout — a fake that respects the context
+
+The real `CarSimulator` returns instantly, so it never triggers the timeout.
+To test the timeout path, use a separate test fake that is deliberately slow and races
+its own delay against the context deadline:
+
+```go
+func (s *slowCar) Send(ctx context.Context, command domain.RemoteCommand) error {
+    select {
+    case <-time.After(s.delay):
+        return nil          // car responded before the deadline
+    case <-ctx.Done():
+        return ctx.Err()    // the timeout fired first
+    }
+}
+```
+
+Set `delay` longer than `sendTimeout` → the context wins → command marked FAILED.
+This is also how a real car client should behave: respect the caller's deadline.
+
+### The deepest insight — a timeout is ambiguous
+
+When a car call times out, the system CANNOT tell which happened:
+- the command never reached the car, OR
+- the command reached the car, executed, and only the acknowledgement was lost on the way back
+
+From the caller's side these are indistinguishable — you only know you got no response,
+not that the work did not happen.
+
+**Consequence:** since you must retry on timeout, and the original attempt may have
+actually succeeded, the operation MUST be idempotent on the receiving side (the car).
+Idempotency is an end-to-end property, not a single checkpoint in your service.
+
+> Interview phrasing: "When a remote command times out, I can't tell whether it failed or
+> whether it succeeded and the acknowledgement was lost. The two are indistinguishable, so
+> safe retry requires idempotency on the car's side too — idempotency is an end-to-end
+> property, not just a check in my service."
+
+### Backoff — spreading retries over time
+
+Naive retry is dangerous. If a downstream system (the car fleet, a backend) is struggling
+and every client retries immediately on the same schedule, the retries pile up and hit the
+recovering system all at once — a **retry storm** that makes the outage worse.
+
+**Exponential backoff** — wait longer after each failure: 1s, 2s, 4s, ... capped at a max.
+
+**Jitter** — add randomness to the delay. Without jitter, all clients that failed at the
+same instant retry at the same intervals — synchronized waves. Jitter spreads them out.
+
+### The full-jitter formula
+
+```
+base = 1s, cap = 30s
+exponential = min(cap, base * 2^attempt)
+delay       = random(0, exponential)   ← full jitter
+```
+
+```go
+func Backoff(attempt int, base, cap time.Duration) time.Duration {
+    if attempt < 0 { attempt = 0 }
+
+    // compute the ceiling in float to avoid int64 overflow on large attempts,
+    // and cap BEFORE converting to Duration so the conversion can never overflow
+    exponentialFloat := float64(base) * math.Pow(2, float64(attempt))
+    if exponentialFloat > float64(cap) {
+        exponentialFloat = float64(cap)
+    }
+    exponential := time.Duration(exponentialFloat)
+    if exponential <= 0 {
+        exponential = cap
+    }
+
+    return time.Duration(rand.Int64N(int64(exponential) + 1)) // [0, exponential]
+}
+```
+
+Key detail: cap in float space, *before* the `time.Duration` conversion. Converting a
+huge float to int64 first can overflow into garbage; capping first makes it safe.
+
+### Why full jitter beats a guaranteed minimum wait
+
+Full jitter returns `random(0, exponential)` — a retry can fire almost immediately even
+on a high attempt. That feels wasteful, but the goal of backoff is not "each client waits
+politely" — it is "the herd never moves together."
+
+With a guaranteed minimum wait, 1000 clients that failed together are all forced into the
+*same narrow band* of time → a synchronized burst. Full jitter spreads them across the
+*entire* window → lower peak load at any instant. A few early retries are far less harmful
+than a synchronized wave.
+
+> Interview phrasing: "Full jitter allows near-zero delays, which seems wasteful, but it
+> spreads retries across the whole window so the peak load is lower. The point of backoff
+> is to desynchronize the herd, not to make each client wait a fixed amount."
+
+### How retry fits the architecture (Part 2 — the poller)
+
+The consumer records the outcome of ONE delivery. A separate **retry poller** owns
+"try again later" — like the notification dispatcher's polling loop:
+
+```
+Every interval:
+  find commands where status = FAILED
+    and retry_count < max
+    and last_attempt_at + backoff(retry_count) < now
+  for each:
+    increment retry_count, re-publish to Kafka
+  commands at retry_count >= max → DEAD
+```
+
+The `last_attempt_at + backoff(retry_count) < now` clause implements backoff WITHOUT
+sleeping in code — you store when the last attempt happened and only retry once enough
+time has elapsed. Database-driven backoff is more robust than sleeping in a goroutine.
+
+
+---
+
+## References
+
+Articles read while building this project, both from the Amazon Builders' Library:
+
+- **Timeouts, retries, and backoff with jitter** — the source for Concept 6 (retry storms,
+  exponential backoff, why full jitter spreads load better than a guaranteed minimum wait).
+  https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
+
+- **Making retries safe with idempotent APIs** — the source for Concepts 4 and 5 (idempotency
+  keys, why retries require idempotency, the claim-vs-proof distinction and the dual-write problem).
+  https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/

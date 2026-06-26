@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
 	"github.com/segmentio/kafka-go"
@@ -53,6 +54,21 @@ func (f *fakeCar) Send(ctx context.Context, command domain.RemoteCommand) error 
 	return f.sendErr
 }
 
+type slowCar struct {
+	delay     time.Duration
+	sendCount int
+}
+
+func (s *slowCar) Send(ctx context.Context, command domain.RemoteCommand) error {
+	s.sendCount++
+	select {
+	case <-time.After(s.delay):
+		return nil // car responded in time
+	case <-ctx.Done():
+		return ctx.Err() // timeout fired first
+	}
+}
+
 func TestConsumer_IdempotencySkipsDuplicateCommand(t *testing.T) {
 	repo := &fakeCommandRepository{
 		processed: make(map[string]bool),
@@ -61,7 +77,7 @@ func TestConsumer_IdempotencySkipsDuplicateCommand(t *testing.T) {
 
 	car := &fakeCar{}
 
-	consumer := NewConsumer(nil, repo, car)
+	consumer := NewConsumer(nil, repo, car, 5*time.Second)
 
 	command := domain.RemoteCommand{
 		ID:         "command-123",
@@ -109,7 +125,7 @@ func TestConsumer_Process_CarOfflineReturnsNilAndMarksFailed(t *testing.T) {
 		sendErr: errors.New("car is offline"),
 	}
 
-	consumer := NewConsumer(nil, repo, car)
+	consumer := NewConsumer(nil, repo, car, 5*time.Second)
 
 	command := domain.RemoteCommand{
 		ID:         "command-456",
@@ -153,7 +169,7 @@ func TestConsumer_Process_MarkProcessedErrorReturnsError(t *testing.T) {
 
 	car := &fakeCar{}
 
-	consumer := NewConsumer(nil, repo, car)
+	consumer := NewConsumer(nil, repo, car, 5*time.Second)
 
 	command := domain.RemoteCommand{
 		ID:         "command-789",
@@ -192,7 +208,7 @@ func TestConsumer_Process_MalformedJSONReturnsNil(t *testing.T) {
 
 	car := &fakeCar{}
 
-	consumer := NewConsumer(nil, repo, car)
+	consumer := NewConsumer(nil, repo, car, 5*time.Second)
 
 	msg := kafka.Message{
 		Key:   []byte("car-001"),
@@ -206,5 +222,34 @@ func TestConsumer_Process_MalformedJSONReturnsNil(t *testing.T) {
 
 	if car.sendCount != 0 {
 		t.Fatalf("car.Send called %d times, want 0", car.sendCount)
+	}
+}
+
+func TestConsumer_Process_CarTimeoutMarksFailed(t *testing.T) {
+	repo := &fakeCommandRepository{
+		processed: make(map[string]bool),
+		statuses:  make(map[string]domain.CommandStatus),
+	}
+
+	// car takes 200ms, but the timeout is 50ms — the timeout wins
+	car := &slowCar{delay: 200 * time.Millisecond}
+
+	consumer := NewConsumer(nil, repo, car, 50*time.Millisecond)
+
+	command := domain.RemoteCommand{
+		ID:    "command-timeout",
+		CarID: "car-001",
+		Type:  domain.CommandStartClimate,
+	}
+	value, _ := json.Marshal(command)
+	msg := kafka.Message{Key: []byte(command.CarID), Value: value}
+
+	err := consumer.process(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("process returned error: %v", err)
+	}
+
+	if repo.statuses[command.ID] != domain.CommandStatusFailed {
+		t.Fatalf("status = %s, want FAILED", repo.statuses[command.ID])
 	}
 }

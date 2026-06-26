@@ -5,22 +5,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
 	"github.com/segmentio/kafka-go"
 )
 
 type Consumer struct {
-	reader     *kafka.Reader
-	repository domain.CommandRepository
-	car        domain.Car
+	reader      *kafka.Reader
+	repository  domain.CommandRepository
+	car         domain.Car
+	sendTimeout time.Duration
 }
 
-func NewConsumer(reader *kafka.Reader, repository domain.CommandRepository, car domain.Car) *Consumer {
+func NewConsumer(reader *kafka.Reader, repository domain.CommandRepository, car domain.Car, sendTimeout time.Duration) *Consumer {
 	return &Consumer{
-		reader:     reader,
-		repository: repository,
-		car:        car,
+		reader:      reader,
+		repository:  repository,
+		car:         car,
+		sendTimeout: sendTimeout,
 	}
 }
 
@@ -75,7 +78,10 @@ func (c *Consumer) process(ctx context.Context, msg kafka.Message) error {
 		return fmt.Errorf("update status to SENT: %w", err)
 	}
 
-	if err := c.car.Send(ctx, command); err != nil {
+	sendCtx, cancel := context.WithTimeout(ctx, c.sendTimeout)
+	err = c.car.Send(sendCtx, command)
+	cancel()
+	if err != nil {
 		log.Printf("consumer: car send failed for command %s: %v", command.ID, err)
 
 		if updateErr := c.repository.UpdateStatus(ctx, command.ID, domain.CommandStatusFailed); updateErr != nil {
