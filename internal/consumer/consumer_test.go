@@ -89,6 +89,14 @@ func (f *fakeCommandRepository) MarkAcknowledgedAndDone(ctx context.Context, id 
 	return nil
 }
 
+func (f *fakeCommandRepository) FindRetryable(ctx context.Context, maxRetries int) ([]domain.RemoteCommand, error) {
+	return nil, nil
+}
+
+func (f *fakeCommandRepository) MarkForRetry(ctx context.Context, id string, newRetryCount int) error {
+	return nil
+}
+
 type fakeCar struct {
 	sendCount int
 	sendErr   error

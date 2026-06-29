@@ -12,4 +12,7 @@ type CommandRepository interface {
 	MarkDone(ctx context.Context, commandID string) error
 	MarkFailed(ctx context.Context, id string, attemptedAt time.Time) error
 	MarkAcknowledgedAndDone(ctx context.Context, id string) error
+
+	FindRetryable(ctx context.Context, maxRetries int) ([]RemoteCommand, error)
+	MarkForRetry(ctx context.Context, id string, newRetryCount int) error
 }
