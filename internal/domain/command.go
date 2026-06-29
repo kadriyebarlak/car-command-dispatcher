@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 type CommandType string
 
 const (
@@ -20,10 +22,11 @@ const (
 )
 
 type RemoteCommand struct {
-	ID         string
-	CarID      string
-	Type       CommandType
-	Payload    string
-	Status     CommandStatus
-	RetryCount int
+	ID            string
+	CarID         string
+	Type          CommandType
+	Payload       string
+	Status        CommandStatus
+	RetryCount    int
+	LastAttemptAt *time.Time
 }
