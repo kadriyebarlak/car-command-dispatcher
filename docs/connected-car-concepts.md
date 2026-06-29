@@ -6,7 +6,8 @@ tracking, worker pool, graceful shutdown, table-driven tests) are not repeated h
 see that project's `docs/learning/` for those.
 
 This file covers only what is new: asynchronous acknowledgement, Kafka, partition
-ordering, idempotency, at-least-once delivery, and retry/backoff.
+ordering, idempotency, at-least-once delivery, retry/backoff, the dual-write/outbox
+problem, and SELECT FOR UPDATE SKIP LOCKED.
 
 ---
 
@@ -523,6 +524,236 @@ Every interval:
 The `last_attempt_at + backoff(retry_count) < now` clause implements backoff WITHOUT
 sleeping in code — you store when the last attempt happened and only retry once enough
 time has elapsed. Database-driven backoff is more robust than sleeping in a goroutine.
+
+---
+
+## Concept 7 — The retry poller, and the dual-write / outbox problem
+
+### What the poller does
+
+The consumer records the outcome of ONE delivery. A separate **retry poller** owns
+"try this again later." It is a background ticker loop (same shape as the notification
+dispatcher) that runs every interval:
+
+```
+1. FindRetryable: SELECT commands WHERE status = FAILED AND retry_count < max
+2. for each command:
+     due = last_attempt_at + Backoff(retry_count)
+     if now < due            → skip (not yet time)
+     else if retry_count+1 >= max → mark DEAD (give up)
+     else                    → increment retry_count, re-publish to Kafka
+```
+
+The re-published command flows back through the consumer. `TryClaim` sees its state is
+`PROCESSING` (not `DONE`), so it reprocesses instead of skipping — this is exactly why
+the state-bearing record from Concept 5 was needed.
+
+### Database-driven backoff (no sleeping)
+
+The poller does NOT sleep for the backoff duration. Each command stores `last_attempt_at`.
+The poller compares `last_attempt_at + Backoff(retry_count)` against `now` and skips
+commands not yet due. Backoff is computed in Go (so the jitter from Concept 6 applies on
+every decision), not baked into the SQL.
+
+### Per-item errors use continue, not return
+
+One command failing to publish or update must not abandon the rest of the batch:
+
+```go
+if err := p.repository.MarkForRetry(...); err != nil {
+    log.Printf(...); continue   // skip this one, keep processing the others
+}
+```
+
+Only `FindRetryable` failing aborts the whole cycle — there is nothing to loop over.
+(Same lesson as the notification dispatcher's dispatch loop.)
+
+---
+
+### THE DUAL-WRITE PROBLEM (general, interview-ready)
+
+This is the single most important distributed-systems idea in the project, and a common
+interview question. Understand it independently of this project.
+
+**The problem, stated generally:**
+
+> A service often needs to do TWO things that must happen together:
+>   1. change its own database (e.g. mark a row, save state)
+>   2. tell the outside world (publish a message / call another service)
+>
+> There is no way to make a database write and a message-broker publish ATOMIC.
+> They are two different systems. A crash or error between them leaves the two
+> out of sync. This is the **dual-write problem**.
+
+**The two failure shapes (whichever order you pick):**
+
+```
+Order A — write DB first, then publish:
+  DB committed → CRASH → publish never happens
+  → the rest of the world never hears about a change that IS in your DB
+  → "lost message"
+
+Order B — publish first, then write DB:
+  published → CRASH → DB write never happens
+  → the world acted on something your DB has no record of
+  → "phantom / duplicate"
+```
+
+You cannot escape this by reordering. Both orders fail; they just fail differently.
+
+**Where it shows up in this project (three times — same root cause):**
+
+| Location | The two writes that can't be atomic |
+|---|---|
+| Idempotency claim (Concept 4) | `processed_commands` insert + the external `Car.Send` |
+| Submit (Day 3) | insert command in DB + publish to Kafka |
+| Retry poller | `MarkForRetry` in DB + re-publish to Kafka |
+
+---
+
+### THE OUTBOX PATTERN (the standard solution)
+
+The outbox pattern makes the dual-write into a SINGLE atomic database write, then
+publishes separately and reliably.
+
+**The core idea:**
+
+> Instead of "write my data AND publish a message" (two systems, not atomic),
+> do "write my data AND write the message into an outbox table — in ONE transaction"
+> (one system, fully atomic). A separate process reads the outbox and publishes.
+
+**Step by step:**
+
+```
+1. In ONE database transaction:
+     - make the business change (e.g. insert/update the command)
+     - INSERT a row into an `outbox` table describing the message to send
+   Both commit together or neither does. Atomic — same database, one transaction.
+
+2. A separate "relay" / publisher process:
+     - reads unpublished rows from the outbox
+     - publishes each to Kafka
+     - marks the outbox row as published
+
+3. If the relay crashes after publishing but before marking published:
+     - on restart it re-publishes that row → a DUPLICATE, not a loss
+     - duplicates are safe because consumers are idempotent (Concept 4)
+```
+
+**Why this works — it converts the unsolvable into the solvable:**
+
+```
+Dual-write (unsolvable):  DB write + broker publish  → cannot be atomic
+Outbox (solvable):        DB write + outbox-row write → ONE transaction, atomic
+                          then: relay publishes at-least-once → duplicates → idempotency handles them
+```
+
+The outbox does not magically make two systems atomic. It moves the message into the
+database so the "must happen together" part is a single-database transaction. The
+publish becomes a separate, retryable step that is allowed to produce duplicates,
+because the downstream is idempotent.
+
+**The guarantee it gives:**
+
+> Every committed business change WILL eventually be published (at-least-once),
+> and never a phantom publish for a change that did not commit.
+> Combined with idempotent consumers → effectively exactly-once end to end.
+
+**Trade-offs / cost:**
+
+- Extra table and a relay process to run and monitor.
+- Messages are published slightly later (the relay polls or tails the table).
+- Still at-least-once → consumers MUST be idempotent (which is why outbox and
+  idempotency are always discussed together).
+
+**Related real-world mechanisms (good to name in an interview):**
+
+- **Transactional outbox + CDC**: instead of the relay polling the outbox table, a
+  Change-Data-Capture tool (e.g. Debezium) tails the database write-ahead log and
+  publishes outbox rows to Kafka. Lower latency, no polling.
+- This is the standard answer to "how do you reliably publish an event when you also
+  update your database?" — the outbox pattern.
+
+### Interview phrasing (memorize the shape, not the words)
+
+> "You can't atomically write to your database and publish to a broker — they're two
+> systems, so a crash between them desyncs you. That's the dual-write problem. The
+> standard fix is the transactional outbox: in one database transaction you write your
+> business change AND insert the message into an outbox table, so that part is atomic.
+> A separate relay reads the outbox and publishes to Kafka, marking rows as sent. If it
+> crashes mid-way it re-publishes — a duplicate, not a loss — which is fine because
+> consumers are idempotent. So outbox gives at-least-once delivery of every committed
+> change, and with idempotent consumers you get effectively exactly-once. In production
+> you often replace the polling relay with CDC, like Debezium tailing the WAL."
+
+### How this project relates to the outbox
+
+This project does the simple store-then-publish in Submit and in the retry poller,
+WITHOUT an outbox — so it has the dual-write gap documented above (a crash between the
+DB write and the Kafka publish can strand a command). That is an acceptable, documented
+limitation for a learning project. The outbox pattern is the production upgrade that
+closes it.
+
+---
+
+## Concept 8 — Scaling the poller safely: SELECT FOR UPDATE SKIP LOCKED
+
+### The problem
+
+The poller does: `FindRetryable` (read FAILED rows) → loop → `MarkForRetry` + publish.
+There is a window between reading a row and changing its status. In that window the SAME
+command can be picked up again, causing a double re-publish, if either:
+
+- a poll cycle takes longer than the interval and overlaps the next cycle, or
+- more than one poller instance runs (horizontal scaling).
+
+```
+Poller A: SELECT FAILED → gets command X
+Poller B: SELECT FAILED → also gets command X (A hasn't updated it yet)
+both re-publish X → double retry, double retry_count increment
+```
+
+### The fix — SELECT ... FOR UPDATE SKIP LOCKED
+
+Lock the rows you select, and let other readers skip locked rows instead of waiting:
+
+```sql
+SELECT id, car_id, type, payload, status, retry_count, last_attempt_at
+FROM commands
+WHERE status = 'FAILED' AND retry_count < $1
+ORDER BY updated_at ASC
+LIMIT $2
+FOR UPDATE SKIP LOCKED;
+```
+
+- `FOR UPDATE` — locks each selected row for the duration of the transaction; no other
+  transaction can select-for-update or modify it until this one commits.
+- `SKIP LOCKED` — instead of BLOCKING on a row another worker already locked, just skip
+  it and move to the next available row.
+
+Result: two pollers running at once each grab a DISJOINT set of rows. No command is
+processed by two workers in the same moment. This is the standard pattern for a
+database-backed work queue.
+
+### How it fits with the rest
+
+Defense in depth:
+- `SELECT FOR UPDATE SKIP LOCKED` PREVENTS double-pickup at the source.
+- Even if a duplicate somehow slipped through, the idempotency layer (`TryClaim` →
+  PROCESSING/DONE) CATCHES it downstream.
+
+### Scope for this project
+
+This project runs a single poller instance and does NOT use `FOR UPDATE SKIP LOCKED`,
+which is fine for one instance. It is documented as the path to safe horizontal scaling.
+
+### Interview phrasing
+
+> "To run multiple poller instances safely, I'd change the fetch query to
+> SELECT ... FOR UPDATE SKIP LOCKED. FOR UPDATE locks the rows I'm working on, and
+> SKIP LOCKED lets other workers skip them rather than block — so each instance gets a
+> disjoint batch. It's the standard pattern for a database-backed work queue, and it
+> pairs with idempotency as defense in depth."
 
 
 ---
