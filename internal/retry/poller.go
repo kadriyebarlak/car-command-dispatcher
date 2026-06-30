@@ -42,6 +42,9 @@ func NewPoller(
 }
 
 func (p *Poller) Start(ctx context.Context) {
+	log.Printf("retry poller: starting (interval=%s base=%s cap=%s maxRetries=%d)",
+		p.interval, p.base, p.cap, p.maxRetries)
+
 	go func() {
 		ticker := time.NewTicker(p.interval)
 		defer ticker.Stop()
@@ -49,6 +52,7 @@ func (p *Poller) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
+				log.Println("retry poller: context cancelled, stopping")
 				return
 
 			case <-ticker.C:
@@ -66,9 +70,15 @@ func (p *Poller) runOnce(ctx context.Context) error {
 		return fmt.Errorf("find retryable commands: %w", err)
 	}
 
+	log.Printf("retry poller: tick — found %d retryable command(s)", len(commands))
+
 	now := time.Now()
 
 	for _, command := range commands {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		if command.LastAttemptAt == nil {
 			log.Printf("retry poller: command %s has no last_attempt_at, skipping", command.ID)
 			continue
@@ -78,6 +88,7 @@ func (p *Poller) runOnce(ctx context.Context) error {
 		dueAt := command.LastAttemptAt.Add(delay)
 
 		if now.Before(dueAt) {
+			log.Printf("retry poller: command %s not due yet (due in %s)", command.ID, time.Until(dueAt))
 			continue
 		}
 

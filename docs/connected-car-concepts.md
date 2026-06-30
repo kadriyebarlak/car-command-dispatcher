@@ -13,18 +13,64 @@ problem, and SELECT FOR UPDATE SKIP LOCKED.
 
 ## Useful commands (so I do not lose them)
 
+### Run the project
+
 ```bash
-# connect to postgres and list tables
+make docker-up      # start postgres + kafka
+make migrate-up     # run goose migrations
+make run            # start the service
+```
+
+### Inspect the database
+
+```bash
+# list tables
 docker-compose exec postgres psql -U notify -d car_commands -c "\dt"
 
-# create the kafka topic (safe to run every startup)
+# describe a table's columns (useful for checking column types, e.g. TIMESTAMPTZ)
+docker-compose exec postgres psql -U notify -d car_commands -c "\d commands"
+docker-compose exec postgres psql -U notify -d car_commands -c "\d processed_commands"
+
+# see command states and retry counts
+docker-compose exec postgres psql -U notify -d car_commands \
+  -c "SELECT id, status, retry_count, last_attempt_at FROM commands;"
+
+# clear test data and start fresh
+docker-compose exec postgres psql -U notify -d car_commands \
+  -c "DELETE FROM commands; DELETE FROM processed_commands;"
+```
+
+### Kafka
+
+```bash
+# create the topic (safe to run every startup)
 make kafka-topic
 
-# inspect a topic's messages from the console
+# inspect messages on the topic from the console
 docker-compose exec kafka kafka-console-consumer \
   --bootstrap-server localhost:9092 --topic car-commands --from-beginning
 ```
 
+### End-to-end retry test
+
+```bash
+# 1. set a high offline rate in main.go so commands fail: car.NewCarSimulator(0.7)
+# 2. run, then submit a command:
+curl -X POST http://localhost:8080/commands \
+  -H "Content-Type: application/json" \
+  -d '{"car_id":"car-001","type":"START_CLIMATE","payload":"22C"}'
+
+# watch the logs for the journey:
+#   car offline                 -> FAILED
+#   ~seconds later (backoff)     -> "retry poller: republished command ... retry_count=1"
+#   then ACKNOWLEDGED (a retry caught the car online) or DEAD (after maxRetries attempts)
+
+# confirm the final state in the DB:
+docker-compose exec postgres psql -U notify -d car_commands \
+  -c "SELECT id, status, retry_count FROM commands;"
+
+# 3. set the offline rate back to 0 when done.
+```
 ---
 
 ## Concept 1 — Asynchronous acknowledgement

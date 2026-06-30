@@ -16,6 +16,7 @@ import (
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/handler"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/producer"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/repository"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/retry"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/service"
 	"github.com/segmentio/kafka-go"
 )
@@ -51,9 +52,21 @@ func main() {
 	commandService := service.NewCommandService(commandRepository, commandPublisher)
 	commandHandler := handler.NewCommandHandler(commandService)
 
-	carSimulator := car.NewCarSimulator(0)
+	carSimulator := car.NewCarSimulator(0.9)
 	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second)
 	commandConsumer.Start(ctx)
+
+	// retry poller: re-publishes FAILED commands once their backoff has elapsed,
+	// and marks them DEAD after maxRetries. Reuses the same publisher (same topic).
+	retryPoller := retry.NewPoller(
+		commandRepository,
+		commandPublisher,
+		3,              // maxRetries
+		30*time.Second, // poll interval
+		1*time.Second,  // backoff base
+		30*time.Second, // backoff cap
+	)
+	retryPoller.Start(ctx)
 
 	r := chi.NewRouter()
 
@@ -83,6 +96,7 @@ func main() {
 	<-quit
 	log.Println("shutdown signal received")
 
+	// cancel the root context — stops the consumer loop and the retry poller loop
 	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
