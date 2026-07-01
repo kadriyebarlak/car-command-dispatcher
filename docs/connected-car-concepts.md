@@ -1,13 +1,11 @@
-# Connected-Car Command Dispatch — New Concepts
+# Connected-Car Command Dispatch — Concepts
 
-A running notes file for the genuinely new concepts in this project.
-Patterns reused from the notification dispatcher (layered structure, retry, status
-tracking, worker pool, graceful shutdown, table-driven tests) are not repeated here —
-see that project's `docs/learning/` for those.
+A running notes file for the distributed-systems concepts applied in this project. Each concept is written with the reasoning and the trade-offs, not just the code.
 
-This file covers only what is new: asynchronous acknowledgement, Kafka, partition
-ordering, idempotency, at-least-once delivery, retry/backoff, the dual-write/outbox
-problem, and SELECT FOR UPDATE SKIP LOCKED.
+Concepts covered so far: asynchronous acknowledgement, Kafka, partition ordering,
+idempotency, at-least-once delivery, timeouts and retry with backoff/jitter, the
+dual-write/outbox problem, and SELECT FOR UPDATE SKIP LOCKED. More are added as the
+project grows.
 
 ---
 
@@ -75,53 +73,50 @@ docker-compose exec postgres psql -U notify -d car_commands \
 
 ## Concept 1 — Asynchronous acknowledgement
 
-### The difference from notifications
+### The idea
 
-In the notification dispatcher, `Send` was **synchronous**:
+A remote command to a car is not like a normal function call. When you send a command,
+you cannot know immediately whether the car executed it — the car is a physical device
+that may be offline, in a tunnel, or slow to respond. In a real system the confirmation
+(the acknowledgement) comes back **later, on a separate path** — for example a different
+Kafka topic or an HTTP callback — not as the return value of the send call.
 
-```go
-err := notifier.Send(ctx, event)
-// the result is known immediately, in the return value
-```
+This is the difference between two communication styles:
 
-One call, one answer. The terminal status `DELIVERED` was set the moment `Send` returned.
+- **Request/response** — you send and get the answer in the same call.
+- **Asynchronous messaging** — you send now, and the answer arrives separately later.
 
-In connected-car commands, the acknowledgement is **asynchronous**:
+### Why this shapes the status model
 
-```
-1. Send command to car   → status SENT
-2. ... time passes ...
-3. Car confirms execution → status ACKNOWLEDGED  (arrives on a separate path)
-```
-
-The acknowledgement does NOT come back as the return value of the send call.
-It arrives later, through a separate channel — another Kafka topic or an HTTP callback.
-
-### The design consequence
-
-`SENT → ACKNOWLEDGED` cannot happen inside the function that sent the command.
-There is no return value to wait for. The system needs a **second, independent path**
-that receives acknowledgements and updates the status of a command sent earlier.
-
-- **Request/response** (notifications) — send and get the answer in one call
-- **Asynchronous messaging** (connected car) — send now, receive the answer separately later
-
-### Interview phrasing
-
-> "Remote car commands are asynchronous — you send a command but the acknowledgement
-> comes back on a separate path. So the system has to correlate the response to the
-> original command and handle the case where the acknowledgement never arrives."
-
-### The status lifecycle
+Because the confirmation arrives separately, the lifecycle needs a distinct state for
+"sent to the car but not yet confirmed" versus "the car confirmed it." That is why
+`SENT` and `ACKNOWLEDGED` are two states, not one:
 
 ```
 PENDING      — received, not yet published to Kafka
 PUBLISHED    — placed on the Kafka topic
 SENT         — consumer picked it up and sent to the car
-ACKNOWLEDGED — the car confirmed execution  (asynchronous, terminal success)
+ACKNOWLEDGED — the car confirmed execution (terminal success)
 FAILED       — a send attempt failed, will retry
 DEAD         — max retries reached, given up
 ```
+
+### What this project actually does — a deliberate simplification
+
+In this project the car is a **simulator** (`CarSimulator`) whose `Send` returns
+synchronously — success or failure comes straight back as the return value. So here
+`SENT → ACKNOWLEDGED` happens inside the same `process` call, right after `car.Send`
+returns. There is no separate acknowledgement path.
+
+This is a conscious scoping choice. The status model still keeps `SENT` and
+`ACKNOWLEDGED` as distinct states so the asynchronous design is visible, but the
+implementation collapses them into one synchronous step. Building the real second path —
+the car confirming later on its own channel — is a natural next extension of the project.
+
+> Note for anyone reading the code: `SENT → ACKNOWLEDGED` is synchronous here because the
+> simulated car answers immediately. A real car would acknowledge asynchronously, and the
+> service would correlate that late acknowledgement back to the original command by ID and
+> handle the case where it never arrives.
 
 ---
 
