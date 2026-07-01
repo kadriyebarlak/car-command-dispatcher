@@ -71,52 +71,71 @@ docker-compose exec postgres psql -U notify -d car_commands \
 ```
 ---
 
-## Concept 1 — Asynchronous acknowledgement
+## Concept 1 — Acknowledgement: how you learn a command worked
 
 ### The idea
 
 A remote command to a car is not like a normal function call. When you send a command,
 you cannot know immediately whether the car executed it — the car is a physical device
-that may be offline, in a tunnel, or slow to respond. In a real system the confirmation
-(the acknowledgement) comes back **later, on a separate path** — for example a different
-Kafka topic or an HTTP callback — not as the return value of the send call.
+that may be offline, in a tunnel, or slow to respond. So the real question is: **how does
+the service learn whether the command actually took effect?**
 
-This is the difference between two communication styles:
+There are three patterns, from simplest to messiest in real-world systems:
 
-- **Request/response** — you send and get the answer in the same call.
-- **Asynchronous messaging** — you send now, and the answer arrives separately later.
+1. **Synchronous response** — the send call returns the result immediately.
+   Simple, but only works when the device answers right away.
+2. **Asynchronous acknowledgement** — the device sends a confirmation back *later*, on a
+   separate channel (a different topic, an HTTP callback), correlated to the command by ID.
+3. **State reconciliation** — there is *no* acknowledgement at all. You fire the command,
+   then separately watch the device's own reported state (telemetry) to *infer* whether it
+   worked. Common in real telematics, because a dedicated ack channel often does not exist.
 
-### Why this shapes the status model
+### Why the lifecycle has separate SENT and ACKNOWLEDGED states
 
-Because the confirmation arrives separately, the lifecycle needs a distinct state for
-"sent to the car but not yet confirmed" versus "the car confirmed it." That is why
-`SENT` and `ACKNOWLEDGED` are two states, not one:
+Because confirmation does not arrive with the send call, the model needs a distinct state
+for "sent to the car but not yet confirmed" versus "confirmed done":
 
 ```
 PENDING      — received, not yet published to Kafka
 PUBLISHED    — placed on the Kafka topic
-SENT         — consumer picked it up and sent to the car
-ACKNOWLEDGED — the car confirmed execution (terminal success)
-FAILED       — a send attempt failed, will retry
+SENT         — consumer picked it up and sent to the car/device
+ACKNOWLEDGED — the car's execution was confirmed (terminal success)
+FAILED       — a send attempt failed or was not confirmed, will retry
 DEAD         — max retries reached, given up
 ```
+
+### A real production example — state reconciliation (pattern 3)
+
+On a car-sharing platform I worked on, door open/close commands followed a fire-and-forget
+plus telemetry/state reconciliation model, which is a good example of why acknowledgement
+is hard.
+
+- The send was **fire-and-forget**. The service handed the command to the telematics layer
+  ("send when connected") and returned. The call was `void` — "success" only meant the send
+  did not throw, not that the door actually opened or closed.
+- There was **no direct ACK tied to the door command** in the car-sharing service. Door
+  state was learned from a separate telemetry/event pipeline.
+- **Door open** was checked later using vehicle state such as ignition, physical door status,
+  central lock status, and related timestamps.
+- **Door close** was checked later using `doorLockStatus`, which represents whether the vehicle was locked or unlocked.
+
+So there was no clean "the car said yes." There was: send the command, store timestamps,
+watch the vehicle's telemetry and events, and infer the result from later state. This is
+mostly pattern 3 — the service relied on telemetry/state/event reconciliation because there
+was no reliable per-command ACK for the door command.
 
 ### What this project actually does — a deliberate simplification
 
 In this project the car is a **simulator** (`CarSimulator`) whose `Send` returns
-synchronously — success or failure comes straight back as the return value. So here
-`SENT → ACKNOWLEDGED` happens inside the same `process` call, right after `car.Send`
-returns. There is no separate acknowledgement path.
+synchronously — success or failure comes straight back as the return value (pattern 1). So
+here `SENT → ACKNOWLEDGED` happens inside the same `process` call, right after `car.Send`
+returns. There is no separate ack path and no state reconciliation.
 
-This is a conscious scoping choice. The status model still keeps `SENT` and
-`ACKNOWLEDGED` as distinct states so the asynchronous design is visible, but the
-implementation collapses them into one synchronous step. Building the real second path —
-the car confirming later on its own channel — is a natural next extension of the project.
-
-> Note for anyone reading the code: `SENT → ACKNOWLEDGED` is synchronous here because the
-> simulated car answers immediately. A real car would acknowledge asynchronously, and the
-> service would correlate that late acknowledgement back to the original command by ID and
-> handle the case where it never arrives.
+This is a conscious scoping choice. The status model still keeps `SENT` and `ACKNOWLEDGED`
+as distinct states so the concept stays visible, but the implementation collapses them into
+one synchronous step. The real-world versions — an async ack channel (pattern 2), or the
+telemetry-reconciliation approach from the car-sharing platform above (pattern 3) — are the
+natural extensions if the project grew toward production behaviour.
 
 ---
 
@@ -134,15 +153,6 @@ lost on crash), Kafka persists messages and survives restarts.
 - **Producer** — writes messages to a topic.
 - **Consumer** — reads messages. Consumers in the same **consumer group** share the work;
   each message goes to only one consumer in the group. This is how you scale horizontally.
-
-### Why Kafka over a Go channel
-
-| | Go channel | Kafka |
-|---|---|---|
-| Lives | In process memory | External, on disk |
-| Survives restart | No — all jobs lost | Yes — messages persist |
-| Multiple readers | No | Yes, independent consumer groups |
-| Replay | No | Yes, re-read from any offset |
 
 ### Offsets and delivery guarantees
 
