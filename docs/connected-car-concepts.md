@@ -190,7 +190,8 @@ Kafka gives at-least-once delivery
 ### The problem
 
 Kafka only guarantees message order **within a single partition** — not across partitions.
-If commands for one car were spread across partitions, they could be consumed out of order.
+If commands for one car were spread across multiple partitions, they could be consumed out
+of order.
 
 ### Concrete failure example
 
@@ -201,11 +202,19 @@ If these land on different partitions and are consumed out of order:
   → climate ends up RUNNING, even though the user's last command was STOP
 ```
 
-### The fix — key by CarID
+### The fix — key by CarID (and how the hashing works)
 
-Using `CarID` as the Kafka message key means all commands for one car hash to the
-**same partition**, so they stay ordered. Different cars may be on different partitions,
-processed in parallel.
+You do not compute a partition yourself. You set a **key** on each message, and Kafka's
+partitioner hashes that key to pick a partition:
+
+```
+partition = hash(key) % numberOfPartitions
+```
+
+By using `CarID` as the key (`Key: []byte(command.CarID)` in segmentio/kafka-go), every
+command for one car hashes to the **same partition**, so that car's commands stay ordered.
+Different cars hash to different partitions and are processed in parallel. The default hash
+is murmur2 (same as the Java client, so keys map consistently across clients).
 
 ### The elegant property
 
@@ -228,15 +237,93 @@ You scale by adding **partitions and consumers in a group**:
 → same car (same partition) stays ordered
 ```
 
-This is why the consumer runs a single goroutine per partition — concurrent goroutines
-on one partition would reorder a single car's commands.
+The consumer runs a single goroutine per partition — concurrent goroutines on one
+partition would reorder a single car's commands.
 
-### Interview phrasing
+The partition count is the **ceiling on parallelism** within a group: you can have at most
+as many actively-working consumers as there are partitions. Extra consumers sit idle.
+Fewer consumers than partitions is fine — each consumer just owns more than one partition
+and reads them one at a time (no partition is ever ignored).
 
-> "I keyed by car ID so commands for a single car stay ordered within one partition,
-> while different cars are processed in parallel across partitions. Kafka only guarantees
-> ordering within a partition, so the key choice is what gives you per-entity ordering.
-> To scale, you add partitions and consumers — one consumer per partition — not goroutines."
+### Partition mechanics worth remembering
+
+**Where the partition is chosen: the producer.** The producer decides which partition
+each message goes to, before it ever reaches the broker. Two cases:
+
+- **Key set** (this project, key = CarID): `partition = hash(key) % partitionCount`.
+  Same key → same partition → ordered. This is keyed/hash partitioning.
+- **No key**: the producer spreads messages across partitions roughly evenly
+  (round-robin / sticky batching). No ordering guarantee — fine when order does not matter.
+
+So "how do messages split across 3 partitions?" → keyed messages by `hash(key) % 3`,
+keyless messages round-robin. Either way it is the **producer's** decision, not the broker's.
+
+**Choosing the strategy in code (segmentio/kafka-go).** The producer's key and balancer
+decide this:
+
+```go
+// Keyed → hash-by-key → same key to same partition → ORDERED (this project)
+kafka.Message{Key: []byte(command.CarID), Value: value}
+
+// No key → round-robin across partitions → NOT ordered, maximum spread
+kafka.Message{Value: value}                 // drop the Key
+// optionally make it explicit on the Writer:
+//   Balancer: &kafka.RoundRobin{}          // cycle partitions
+//   Balancer: &kafka.LeastBytes{}          // send to the least-loaded partition
+//   Balancer: &kafka.Hash{}                // hash the key (what a keyed writer does)
+```
+
+When to use which: **keyed/hash** when per-entity order matters (car commands — START then
+STOP for one car must stay ordered). **Round-robin/keyless** for independent messages where
+order is irrelevant and even spread is the goal — metrics, logs, click/telemetry events.
+This project keeps the key = CarID because command ordering per car is a real requirement;
+switching to round-robin here would reintroduce the out-of-order bug from the failure
+example above.
+
+**Consumer-count scenarios (group of consumers, N partitions):**
+
+```
+3 partitions, 3 consumers → 1 partition each, full parallelism
+3 partitions, 2 consumers → one consumer gets 2 partitions, the other 1 (no idle, less parallel)
+3 partitions, 4 consumers → 3 work, 1 sits IDLE (a partition maps to only one consumer)
+3 partitions, 1 consumer  → that consumer reads all 3, one message at a time (correct, not parallel)
+```
+
+**One consumer dies → rebalance.** If a consumer in the group crashes, Kafka detects it
+(missed heartbeats) and **rebalances**: its partitions are reassigned to the surviving
+consumers automatically. With 3 partitions / 3 consumers, losing one leaves 2 consumers
+splitting 3 partitions (2 + 1). No messages are lost — the new owner resumes from the last
+committed offset. When the consumer comes back, another rebalance redistributes evenly again.
+
+**The ceiling:** parallelism within a group is capped at the partition count. To go faster,
+add partitions first, then consumers — never more consumers than partitions.
+
+### Caveat — changing partition count re-maps keys
+
+Because the partition is `hash(key) % numberOfPartitions`, changing the partition count
+changes where existing keys land: `hash(k) % 6` and `hash(k) % 8` can differ for the same
+key. Adding partitions can therefore break ordering for in-flight commands, which is why
+partition count is a decision you try to fix up front rather than change casually.
+
+### How to actually scale this (mechanics)
+
+- **Partition count lives on the topic**, not in the Go code. To change it you alter the
+  topic (`kafka-topics --alter --partitions N`) or delete and recreate it. The Kafka
+  writer, the consumer code, and docker-compose do **not** change — keying by `CarID`
+  already makes the code partition-count-agnostic.
+- **To run a second consumer instance**, start the program again with the **same `GroupID`**
+  (on a different HTTP port locally). Kafka's consumer group automatically assigns partitions
+  to the instances — no assignment code. Stop one and Kafka **rebalances** the partition to a
+  survivor automatically.
+
+### What this project actually does
+
+This project creates the topic with **a single partition** (`--partitions 1`). With one
+partition, every message is on the same partition, so ordering is trivially guaranteed and
+the CarID key is not yet doing real work — it is set deliberately so that the moment the
+topic is scaled to multiple partitions, per-car ordering holds automatically without any
+code change. The keying is correct and future-proof; the multi-partition behaviour above is
+the design it enables, not something the single-partition setup exercises today.
 
 ---
 
@@ -425,8 +512,10 @@ these get genuinely close to exactly-once.
 
 ### Scope note for this project
 
-The simple binary claim is kept here, with the limitation documented. Finding and
-explaining the flaw matters more than a perfect implementation.
+This project implements **Fix 2** — a state-bearing `processed_commands` record with a
+`TryClaim` method (claims/reprocesses when `PROCESSING`, skips only when `DONE`), plus a
+transaction around the acknowledge-and-done writes. The claim-vs-actually-sent gap against
+the external car call is documented as the remaining dual-write limitation.
 
 > Interview phrasing: "My first idempotency design had a gap — a failure between claiming
 > and doing the work would block redelivery from retrying. The fix is a state-bearing
@@ -560,7 +649,7 @@ than a synchronized wave.
 ### How retry fits the architecture (Part 2 — the poller)
 
 The consumer records the outcome of ONE delivery. A separate **retry poller** owns
-"try again later" — like the notification dispatcher's polling loop:
+"try again later" — a background polling loop:
 
 ```
 Every interval:
@@ -583,8 +672,7 @@ time has elapsed. Database-driven backoff is more robust than sleeping in a goro
 ### What the poller does
 
 The consumer records the outcome of ONE delivery. A separate **retry poller** owns
-"try this again later." It is a background ticker loop (same shape as the notification
-dispatcher) that runs every interval:
+"try this again later." It is a background ticker loop that runs every interval:
 
 ```
 1. FindRetryable: SELECT commands WHERE status = FAILED AND retry_count < max
@@ -617,7 +705,6 @@ if err := p.repository.MarkForRetry(...); err != nil {
 ```
 
 Only `FindRetryable` failing aborts the whole cycle — there is nothing to loop over.
-(Same lesson as the notification dispatcher's dispatch loop.)
 
 ---
 
