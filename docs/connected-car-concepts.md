@@ -407,7 +407,7 @@ Make the operation **idempotent on the receiving side**. If the car treats
 harmless — and at-least-once delivery becomes safe regardless of order. A production
 system also adds a sweeper to find commands stuck in an intermediate state and re-drive them.
 
-### Interview phrasing
+### Key point
 
 > "Recording before sending risks losing the command on a crash; sending before recording
 > risks executing twice. Which is worse depends on the command. The robust solution is to
@@ -461,7 +461,7 @@ consumer is stuck and no other messages flow. This is a **poison message** (pois
 - Production fix: publish the bad message to a **dead-letter queue** (`car-commands-dlq`)
   *then* commit — preserves it for inspection instead of silently dropping it.
 
-> Interview phrasing: "I commit past poison messages to avoid an infinite redelivery loop,
+> Key point: "I commit past poison messages to avoid an infinite redelivery loop,
 > and in production I'd route them to a dead-letter queue rather than dropping them."
 
 ### The bug: idempotency claim fights at-least-once redelivery
@@ -517,10 +517,28 @@ This project implements **Fix 2** — a state-bearing `processed_commands` recor
 transaction around the acknowledge-and-done writes. The claim-vs-actually-sent gap against
 the external car call is documented as the remaining dual-write limitation.
 
-> Interview phrasing: "My first idempotency design had a gap — a failure between claiming
+> Key point: "My first idempotency design had a gap — a failure between claiming
 > and doing the work would block redelivery from retrying. The fix is a state-bearing
 > idempotency record plus a transaction around the database writes, though the external
 > car call still can't be made fully atomic — that's the dual-write problem."
+
+### Why a stuck SENT command is rare — and where a sweeper still helps
+
+It is worth being precise about when a command can strand in `SENT`. `SENT` is written
+*before* the Kafka offset is committed (the commit only happens after `process` returns
+success). So under a normal crash — power loss, OOM kill, a DB error from
+`MarkAcknowledgedAndDone` — the offset was never committed, Kafka **redelivers**, `TryClaim`
+sees `PROCESSING`, and the command is reprocessed. It self-heals. The one caveat is that the
+car may then be sent the command twice, which is why the car should be idempotent on its own
+side.
+
+A command only truly strands in `SENT` if the Kafka offset advances past it *without* the
+command ever reaching `DONE` — which needs an abnormal event, not a routine crash: a manual
+offset reset, a consumer-group reset that skips the message, or a retention edge case. So a
+**stuck-command sweeper** (find commands sitting in `SENT` past a staleness threshold and
+reset them to `FAILED` so retry re-drives them) is defense-in-depth for those rare cases, not
+something the normal happy/crash paths require. This project does not implement it; it is a
+documented safety net.
 
 ---
 
