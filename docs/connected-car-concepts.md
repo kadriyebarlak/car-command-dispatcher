@@ -603,7 +603,7 @@ not that the work did not happen.
 actually succeeded, the operation MUST be idempotent on the receiving side (the car).
 Idempotency is an end-to-end property, not a single checkpoint in your service.
 
-> Interview phrasing: "When a remote command times out, I can't tell whether it failed or
+> Key point: "When a remote command times out, I can't tell whether it failed or
 > whether it succeeded and the acknowledgement was lost. The two are indistinguishable, so
 > safe retry requires idempotency on the car's side too — idempotency is an end-to-end
 > property, not just a check in my service."
@@ -660,7 +660,7 @@ With a guaranteed minimum wait, 1000 clients that failed together are all forced
 *entire* window → lower peak load at any instant. A few early retries are far less harmful
 than a synchronized wave.
 
-> Interview phrasing: "Full jitter allows near-zero delays, which seems wasteful, but it
+> Key point: "Full jitter allows near-zero delays, which seems wasteful, but it
 > spreads retries across the whole window so the peak load is lower. The point of backoff
 > is to desynchronize the herd, not to make each client wait a fixed amount."
 
@@ -728,8 +728,7 @@ Only `FindRetryable` failing aborts the whole cycle — there is nothing to loop
 
 ### THE DUAL-WRITE PROBLEM (general, interview-ready)
 
-This is the single most important distributed-systems idea in the project, and a common
-interview question. Understand it independently of this project.
+This is the single most important distributed-systems idea in the project.
 
 **The problem, stated generally:**
 
@@ -822,7 +821,7 @@ because the downstream is idempotent.
 - Still at-least-once → consumers MUST be idempotent (which is why outbox and
   idempotency are always discussed together).
 
-**Related real-world mechanisms (good to name in an interview):**
+**Related real-world mechanisms (good to name):**
 
 - **Transactional outbox + CDC**: instead of the relay polling the outbox table, a
   Change-Data-Capture tool (e.g. Debezium) tails the database write-ahead log and
@@ -830,7 +829,7 @@ because the downstream is idempotent.
 - This is the standard answer to "how do you reliably publish an event when you also
   update your database?" — the outbox pattern.
 
-### Interview phrasing (memorize the shape, not the words)
+### Key point
 
 > "You can't atomically write to your database and publish to a broker — they're two
 > systems, so a crash between them desyncs you. That's the dual-write problem. The
@@ -846,9 +845,7 @@ because the downstream is idempotent.
 
 This project does the simple store-then-publish in Submit and in the retry poller,
 WITHOUT an outbox — so it has the dual-write gap documented above (a crash between the
-DB write and the Kafka publish can strand a command). That is an acceptable, documented
-limitation for a learning project. The outbox pattern is the production upgrade that
-closes it.
+DB write and the Kafka publish can strand a command). The outbox pattern is the production upgrade that closes it.
 
 ---
 
