@@ -900,7 +900,7 @@ Defense in depth:
 This project runs a single poller instance and does NOT use `FOR UPDATE SKIP LOCKED`,
 which is fine for one instance. It is documented as the path to safe horizontal scaling.
 
-### Interview phrasing
+### Key point
 
 > "To run multiple poller instances safely, I'd change the fetch query to
 > SELECT ... FOR UPDATE SKIP LOCKED. FOR UPDATE locks the rows I'm working on, and
