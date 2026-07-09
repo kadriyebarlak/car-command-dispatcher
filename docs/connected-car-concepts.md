@@ -922,3 +922,99 @@ Articles read while building this project, both from the Amazon Builders' Librar
 - **Making retries safe with idempotent APIs** — the source for Concepts 4 and 5 (idempotency
   keys, why retries require idempotency, the claim-vs-proof distinction and the dual-write problem).
   https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+
+
+## Concept 9 — Atomic Writes, PID Files, and Write-Ahead Logging (WAL)
+
+### The one root problem behind all of this
+
+A crash or power loss can happen at ANY moment — even in the middle of a write.
+Every idea below exists to answer: **how do we keep data correct even if that happens?**
+
+### Atomic file operations
+
+Writing directly to a file can leave it half-written if a crash happens mid-write.
+UNIX gives us some system calls that are atomic at the OS level — the operation either
+fully happens or does not happen at all, never a half-done state (see the list of atomic
+UNIX operations: https://rcrowley.org/2010/01/06/things-unix-can-do-atomically.html).
+This is the building block everything else relies on.
+
+### PID files
+
+A PID file stores a running process's ID, used to answer "is this already running?" —
+so a crash-restart doesn't accidentally start a duplicate process that fights the
+original over the same DB/files. A small, simple example of "safely record state on disk."
+
+### Why databases care about crashes
+
+Databases must guarantee **durability**: once something is "committed," it must survive
+a crash. Writing directly to the real data files (tables, B-tree pages, indexes) is risky
+for this — those writes are large and scattered, and a half-applied change can corrupt
+a page that's hard to repair. This is the problem WAL solves.
+
+### WAL (Write-Ahead Log) — one word: **recovery**
+
+Before changing the real data, first write down *what you're about to do*, in a simple
+append-only log. Think of it as a diary of intentions written before the action.
+
+1. append to log: "about to change X from A to B"
+2. fsync the log            ← must happen before step 3
+3. now change the real data
+
+
+Append-only writes are simple and safe — much safer than in-place edits to complex
+data structures.
+
+### Why WAL is written BEFORE the real change
+
+If the crash happens between step 1 and step 3, the log still has proof of what was
+supposed to happen. On restart, that unfinished instruction can be redone (**redo**).
+If the real data were changed first and the crash hit there, you'd have a broken,
+unexplained state with no record of what was intended.
+
+### Recovery after a crash
+on restart:
+
+read the WAL from the last checkpoint
+
+for each entry:
+
+not yet applied → redo (apply it)
+
+should not have been kept → undo
+
+Recovery is only possible because the log survived the crash and memory didn't.
+
+### fsync — the detail that makes it real
+
+`Write()` often only lands in an OS buffer, not physical disk. `fsync()` forces a real
+flush to disk. Without it, a "durable" write can still vanish on power loss. This is a
+speed vs. durability trade-off — batching writes and fsyncing once per batch is a common
+optimization.
+
+### Terms — one line each
+
+- **Atomic file op** → all-or-nothing write, no half-written file
+- **PID file** → detect "already running," avoid duplicate processes
+- **WAL** → recovery — write intent first, so a crash never loses what should happen
+- **fsync** → force OS buffer to real disk, so "written" really means durable
+- **mmap** → treat a file like an in-memory array, fast reads/writes without manual I/O
+- **B-tree** → keep large on-disk data sorted and fast to search (used for indexes)
+- **Page** → fixed-size chunk (e.g. 4KB) databases read/write at once
+- **Checkpoint** → periodically save current state, so replay doesn't start from zero
+- **Idempotency** → doing something twice = same as doing it once (needed because WAL/Kafka can replay)
+
+### How this connects to my project — Outbox Pattern
+
+My dual-write gap (DB write + Kafka publish are not atomic) is the same category of
+problem as WAL solves. The outbox pattern is WAL's idea applied here:
+outbox row = the "log entry" (intent written first, same transaction as the business write)
+
+publish to Kafka = the "real data change" (the actual outside-world effect)
+
+relay/poller replaying unpublished rows = "crash recovery / redo"
+
+Insert the business row + an outbox row in ONE transaction → a separate relay reads
+unpublished outbox rows and publishes them → if the relay crashes mid-publish, it
+re-publishes on restart (a duplicate, not a loss) → safe because consumers are
+idempotent (Concept 4). This is the natural next addition on top of what I already have.
