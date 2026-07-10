@@ -1018,3 +1018,109 @@ Insert the business row + an outbox row in ONE transaction → a separate relay 
 unpublished outbox rows and publishes them → if the relay crashes mid-publish, it
 re-publishes on restart (a duplicate, not a loss) → safe because consumers are
 idempotent (Concept 4). This is the natural next addition on top of what I already have.
+
+## Concept 10 — CDC Disaster Recovery Across Two Data Centers
+
+### The scenario
+
+A CDC pipeline normally runs in one data center: Debezium reads changes from PostgreSQL,
+publishes them to Kafka, and a sink connector writes them into another database. This
+works fine day-to-day — but what happens if that entire data center goes down? A DR
+(Disaster Recovery) design lets a second data center take over without losing data or
+creating duplicates.
+
+Call the two data centers **DC-A** (primary) and **DC-B** (standby).
+
+### The key insight — "staying in sync" is actually three separate layers
+
+It's tempting to think "just replicate the database" is enough. It is not. Three
+independent layers all need to stay in sync, or failover breaks:
+
+1. **Database layer** — the actual data
+2. **Kafka layer** — the messages and how far each consumer has read
+3. **CDC (Debezium) layer** — which position in the database log it has already read
+
+Missing any one of these causes either **duplicate data** or **lost data** after failover.
+
+### Layer 1 — Database replication slots
+
+Tools like Patroni already handle PostgreSQL replication and automatic failover — that
+part is familiar. The subtle problem is that **Debezium doesn't read the database
+directly** — it reads through a **logical replication slot**, which tracks its exact
+read position (an LSN — Log Sequence Number, PostgreSQL's version of a WAL position).
+
+If DC-A dies and DC-B becomes primary, but the replication slot doesn't exist in DC-B at
+the same position, Debezium has no choice but to start over with a fresh snapshot →
+duplicate events, or worse, missed changes.
+
+**Fix**: PostgreSQL 17+ supports **failover slots** — replication slots are
+automatically kept in sync on the standby server, so DC-B has the same slot at the same
+LSN as DC-A. After failover, Debezium can resume from exactly where it left off.
+
+### Layer 2 — Kafka topics AND consumer offsets
+
+Just copying Kafka topics to DC-B is not enough. The sink connector also tracks **which
+offset it has already processed** (its consumer group offset). If that offset is wrong
+after failover:
+
+- offset too old → already-processed messages get reprocessed → duplicates
+- offset too new → unprocessed messages get skipped → data loss
+
+**Fix**: replicate topics *and* consumer group offsets together. **MirrorMaker 2 (MM2)**,
+Kafka's official cross-cluster replication tool, does both — it has separate connectors
+for replicating topic data, syncing consumer offsets, and monitoring replication lag.
+
+**The non-obvious placement rule**: MM2 should run **next to the target cluster, not the
+source** — "remote consume, local produce." For DC-A → DC-B replication, MM2 runs in
+DC-B, pulling remotely from DC-A. Reasoning: the producer side of a replication link is
+the fragile side. If MM2 lived in DC-A and DC-A died completely, replication dies with
+it. Running MM2 in DC-B means it can keep pulling as long as DC-A is reachable at all,
+independent of what else fails in DC-A.
+
+### Layer 3 — Debezium: active-passive, not active-active
+
+Only **one** Debezium connector should be active at a time. Running the same connector
+in both data centers simultaneously means each one manages its own replication slot and
+offset independently, reading the same source and producing duplicate events into Kafka.
+Coordinating two active readers safely is a lot of extra complexity for little benefit.
+
+So: DC-A's connector runs normally. DC-B's connector is fully configured but stays off,
+ready to be switched on.
+
+### Failover sequence (DC-A dies → DC-B takes over)
+
+```
+1. Database failover promotes DC-B to primary
+2. Failover slots mean the replication slot in DC-B is already at the same LSN as DC-A
+3. Kafka topics + consumer offsets are already synced via MM2
+4. MM2 is stopped
+5. DC-B's Debezium connector is switched on, resumes from the same LSN → no re-snapshot, no duplicates, no data loss
+```
+
+### Failback (DC-A comes back)
+
+You don't just switch back immediately — DC-A has fallen behind and must catch up first:
+
+```
+1. DC-A rejoins as a standby, catches up on missing WAL via normal replication
+2. A temporary MM2 is set up in DC-A (this time syncing DC-B → DC-A)
+3. DC-B's connectors are stopped
+4. DC-A's temporary MM2 is stopped
+5. DC-A's connectors are switched back on
+6. DC-B's original MM2 (DC-A → DC-B direction) is reactivated
+```
+
+### How this connects to what I already know
+
+This is the same WAL / offset / idempotency thinking from my project, just at a bigger
+scale — two data centers instead of one process:
+
+- A **replication slot position (LSN)** is the same idea as a **Kafka consumer offset**
+  in my retry poller — both are "how far have I read/processed," just at different
+  layers (Postgres WAL vs. Kafka log).
+- **Active-passive Debezium** is the same reasoning as why my consumer processes one
+  partition with a single goroutine — one active reader avoids duplicate/out-of-order
+  processing; coordinating multiple concurrent readers safely is much harder.
+- The overall goal — resume exactly where you left off after a crash/failover, without
+  losing or duplicating anything — is the same durability goal WAL and the outbox
+  pattern solve, just applied across two entire data centers instead of one database.
