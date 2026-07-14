@@ -1124,3 +1124,64 @@ scale — two data centers instead of one process:
 - The overall goal — resume exactly where you left off after a crash/failover, without
   losing or duplicating anything — is the same durability goal WAL and the outbox
   pattern solve, just applied across two entire data centers instead of one database.
+
+
+## Concept 11 — Observability: metrics, logs, and traces
+
+Source: Amazon Builders' Library — "Instrumenting distributed systems for operational visibility"
+https://aws.amazon.com/builders-library/instrumenting-distributed-systems-for-operational-visibility/
+
+### Why it matters
+
+A service that works is not the same as a service you can *operate*. When something goes
+wrong at 3am — commands piling up in FAILED, the poller falling behind, the car endpoint
+slow — you need to answer "what is happening and why" without guessing. Observability is
+the instrumentation that lets you measure how the system behaves from the outside.
+
+### The three pillars — what each answers
+
+- **Metrics** — *what* is happening, in aggregate: request rate, latency, error rate,
+  queue depth. Cheap to store, good for dashboards and alarms. Answers "is something wrong?"
+- **Logs** — *why*, in detail, for one event: a structured line per command with its ID,
+  status, and any error. Answers "what happened to this specific command?"
+- **Traces** — *where*, across steps: follow one unit of work through the whole pipeline
+  using a shared **trace/correlation ID**, so you can line up what happened where.
+
+Rough rule: metrics find the problem, traces locate it, logs explain it.
+
+### The correlation ID — the single most useful habit
+
+Stamp one ID onto a unit of work at the "front door" and carry it through every stage and
+every log line. Then a single command's whole journey — PENDING → PUBLISHED → SENT →
+retries → ACKNOWLEDGED/DEAD — can be reconstructed by filtering on that one ID.
+
+In this project the command `ID` already *is* that correlation ID. Threading it into every
+log line (structured, as a field) is most of the value for almost none of the cost.
+
+### Metrics worth emitting here (the plan)
+
+Not one lumped "errors" counter — break metrics out by dimension so the most common
+problems surface first:
+
+- commands by outcome: submitted, published, sent, acknowledged, failed, dead
+- retry poller: cycles run, commands re-published, commands marked DEAD
+- car send: latency (a histogram/timer), timeout count, offline count
+- consumer: messages processed, processing latency, consumer lag
+
+Break dependency metrics out per call and per status so "the car endpoint is slow" or
+"DB writes are failing" is visible directly, not inferred.
+
+### Key point
+
+> "Observability is three pillars: metrics for aggregate health, logs for per-request
+> detail, traces for following one request across steps. The cheapest high-value habit is
+> a correlation ID stamped at the front door and carried through every log line — in my
+> service the command ID already plays that role. For metrics I'd break them out by
+> outcome and per dependency, not one lumped error count, so the common failures surface
+> first."
+
+### What this project will add (next step — code)
+
+Not yet implemented. The planned first steps: switch to **structured logging** (`slog`)
+with the command ID as a field on every line, then expose a **`/metrics`** endpoint with
+Prometheus counters for the outcomes above.
