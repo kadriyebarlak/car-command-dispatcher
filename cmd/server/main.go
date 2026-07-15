@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,7 +23,13 @@ import (
 )
 
 func main() {
-	log.Println("car command dispatcher starting...")
+	// FIRST thing — set up structured logging before any log call
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
+	logger.Info("car command dispatcher starting...")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -53,7 +60,7 @@ func main() {
 	commandHandler := handler.NewCommandHandler(commandService)
 
 	carSimulator := car.NewCarSimulator(0.9)
-	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second)
+	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second, logger)
 	commandConsumer.Start(ctx)
 
 	// retry poller: re-publishes FAILED commands once their backoff has elapsed,
