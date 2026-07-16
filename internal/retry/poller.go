@@ -3,7 +3,7 @@ package retry
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
@@ -16,6 +16,7 @@ type CommandPublisher interface {
 type Poller struct {
 	repository domain.CommandRepository
 	publisher  CommandPublisher
+	logger     *slog.Logger
 
 	maxRetries int
 	interval   time.Duration
@@ -30,10 +31,12 @@ func NewPoller(
 	interval time.Duration,
 	base time.Duration,
 	cap time.Duration,
+	logger *slog.Logger,
 ) *Poller {
 	return &Poller{
 		repository: repository,
 		publisher:  publisher,
+		logger:     logger,
 		maxRetries: maxRetries,
 		interval:   interval,
 		base:       base,
@@ -41,9 +44,17 @@ func NewPoller(
 	}
 }
 
+// TODO: Track the poller goroutine with a WaitGroup and add a Stop method.
+// Context cancellation tells the poller to stop, but main currently does not
+// wait for it to finish before closing shared resources(the database pool and Kafka writer).
 func (p *Poller) Start(ctx context.Context) {
-	log.Printf("retry poller: starting (interval=%s base=%s cap=%s maxRetries=%d)",
-		p.interval, p.base, p.cap, p.maxRetries)
+	p.logger.Info(
+		"retry poller starting",
+		"interval", p.interval,
+		"base_backoff", p.base,
+		"backoff_cap", p.cap,
+		"max_retries", p.maxRetries,
+	)
 
 	go func() {
 		ticker := time.NewTicker(p.interval)
@@ -52,12 +63,25 @@ func (p *Poller) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Println("retry poller: context cancelled, stopping")
+				p.logger.Info(
+					"retry poller stopped",
+					"reason", ctx.Err(),
+				)
 				return
 
 			case <-ticker.C:
 				if err := p.runOnce(ctx); err != nil {
-					log.Printf("retry poller: run failed: %v", err)
+					if ctx.Err() != nil {
+						p.logger.Info(
+							"retry poller stopped during run",
+							"reason", ctx.Err(),
+						)
+						return
+					}
+					p.logger.Error(
+						"retry poller run failed",
+						"error", err,
+					)
 				}
 			}
 		}
@@ -70,7 +94,10 @@ func (p *Poller) runOnce(ctx context.Context) error {
 		return fmt.Errorf("find retryable commands: %w", err)
 	}
 
-	log.Printf("retry poller: tick — found %d retryable command(s)", len(commands))
+	p.logger.Info(
+		"retryable commands found",
+		"count", len(commands),
+	)
 
 	now := time.Now()
 
@@ -79,8 +106,15 @@ func (p *Poller) runOnce(ctx context.Context) error {
 			return ctx.Err()
 		}
 
+		commandLogger := p.logger.With(
+			"command_id", command.ID,
+			"retry_count", command.RetryCount,
+		)
+
 		if command.LastAttemptAt == nil {
-			log.Printf("retry poller: command %s has no last_attempt_at, skipping", command.ID)
+			commandLogger.Warn(
+				"command has no last attempt time; skipping",
+			)
 			continue
 		}
 
@@ -88,17 +122,33 @@ func (p *Poller) runOnce(ctx context.Context) error {
 		dueAt := command.LastAttemptAt.Add(delay)
 
 		if now.Before(dueAt) {
-			log.Printf("retry poller: command %s not due yet (due in %s)", command.ID, time.Until(dueAt))
+			commandLogger.Debug(
+				"command is not due for retry yet",
+				"due_at", dueAt,
+				"retry_in", dueAt.Sub(now).String(),
+				"backoff", delay.String(),
+			)
 			continue
 		}
 
 		if command.RetryCount+1 >= p.maxRetries {
-			log.Printf("retry poller: command %s exhausted retries, marking DEAD", command.ID)
+			commandLogger.Warn(
+				"command exhausted retries; marking as dead",
+				"max_retries", p.maxRetries,
+			)
 
 			if err := p.repository.UpdateStatus(ctx, command.ID, domain.CommandStatusDead); err != nil {
-				log.Printf("retry poller: failed to mark command %s as DEAD: %v", command.ID, err)
+				commandLogger.Error(
+					"failed to mark command as dead",
+					"target_status", domain.CommandStatusDead,
+					"error", err,
+				)
 				continue
 			}
+			commandLogger.Info(
+				"command marked as dead",
+				"status", domain.CommandStatusDead,
+			)
 
 			continue
 		}
@@ -106,7 +156,11 @@ func (p *Poller) runOnce(ctx context.Context) error {
 		newRetryCount := command.RetryCount + 1
 
 		if err := p.repository.MarkForRetry(ctx, command.ID, newRetryCount); err != nil {
-			log.Printf("retry poller: failed to mark command %s for retry: %v", command.ID, err)
+			commandLogger.Error(
+				"failed to mark command for retry",
+				"new_retry_count", newRetryCount,
+				"error", err,
+			)
 			continue
 		}
 
@@ -114,11 +168,19 @@ func (p *Poller) runOnce(ctx context.Context) error {
 		command.Status = domain.CommandStatusPublished
 
 		if err := p.publisher.Publish(ctx, command); err != nil {
-			log.Printf("retry poller: failed to publish retry command %s: %v", command.ID, err)
+			commandLogger.Error(
+				"failed to publish retry command",
+				"new_retry_count", newRetryCount,
+				"error", err,
+			)
 			continue
 		}
 
-		log.Printf("retry poller: republished command %s retry_count=%d", command.ID, newRetryCount)
+		commandLogger.Info(
+			"command republished for retry",
+			"new_retry_count", newRetryCount,
+			"status", command.Status,
+		)
 	}
 
 	return nil

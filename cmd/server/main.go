@@ -72,6 +72,7 @@ func main() {
 		30*time.Second, // poll interval
 		1*time.Second,  // backoff base
 		30*time.Second, // backoff cap
+		logger,
 	)
 	retryPoller.Start(ctx)
 
