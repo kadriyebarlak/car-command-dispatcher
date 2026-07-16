@@ -13,6 +13,11 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+// Tests use io.Discard to keep output clean.
+// To see logs temporarily, use os.Stdout and run:
+// go test -v ./internal/consumer/...
+// To bypass the test cache:
+// go test -v -count=1 ./internal/consumer/...
 func newTestLogger() *slog.Logger {
 	return slog.New(
 		slog.NewJSONHandler(io.Discard, nil),
