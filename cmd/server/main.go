@@ -56,8 +56,8 @@ func main() {
 
 	commandRepository := repository.NewPostgresCommandRepository(pool)
 	commandPublisher := producer.NewKafkaPublisher(kafkaWriter)
-	commandService := service.NewCommandService(commandRepository, commandPublisher)
-	commandHandler := handler.NewCommandHandler(commandService)
+	commandService := service.NewCommandService(commandRepository, commandPublisher, logger)
+	commandHandler := handler.NewCommandHandler(commandService, logger)
 
 	carSimulator := car.NewCarSimulator(0.9)
 	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second, logger)

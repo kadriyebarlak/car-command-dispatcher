@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
@@ -10,11 +11,13 @@ import (
 
 type CommandHandler struct {
 	service *service.CommandService
+	logger  *slog.Logger
 }
 
-func NewCommandHandler(service *service.CommandService) *CommandHandler {
+func NewCommandHandler(service *service.CommandService, logger *slog.Logger) *CommandHandler {
 	return &CommandHandler{
 		service: service,
+		logger:  logger,
 	}
 }
 
@@ -49,11 +52,13 @@ func (h *CommandHandler) CreateCommand(w http.ResponseWriter, r *http.Request) {
 	var req createCommandRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.Warn("invalid request body", "error", err)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if errs := req.validate(); len(errs) > 0 {
+		h.logger.Warn("command validation failed", "validation_errors", errs)
 		writeJSON(w, http.StatusBadRequest, map[string][]string{
 			"errors": errs,
 		})

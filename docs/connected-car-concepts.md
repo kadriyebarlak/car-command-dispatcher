@@ -1145,18 +1145,52 @@ the instrumentation that lets you measure how the system behaves from the outsid
 - **Logs** — *why*, in detail, for one event: a structured line per command with its ID,
   status, and any error. Answers "what happened to this specific command?"
 - **Traces** — *where*, across steps: follow one unit of work through the whole pipeline
-  using a shared **trace/correlation ID**, so you can line up what happened where.
+  using a shared ID, so you can line up what happened where.
 
 Rough rule: metrics find the problem, traces locate it, logs explain it.
 
-### The correlation ID — the single most useful habit
+### Correlation ID vs trace ID — the difference
 
-Stamp one ID onto a unit of work at the "front door" and carry it through every stage and
-every log line. Then a single command's whole journey — PENDING → PUBLISHED → SENT →
-retries → ACKNOWLEDGED/DEAD — can be reconstructed by filtering on that one ID.
+These get used loosely, but they are not the same thing:
 
-In this project the command `ID` already *is* that correlation ID. Threading it into every
-log line (structured, as a field) is most of the value for almost none of the cost.
+- **Correlation ID** — the general idea: any ID stamped on related log lines so you can
+  group them by filtering on that one field. Does not require multiple services.
+- **Trace ID** — a *specific kind* of correlation ID, used to follow one request as it
+  crosses **service/process boundaries** in a distributed system. It is propagated over
+  the network (an HTTP header like `traceparent`, or a message header) so a *different*
+  process continues the same trace. Full distributed tracing tools (Jaeger, OpenTelemetry)
+  add **span IDs** on top — one span per segment of the journey — to show the call tree and
+  timing.
+
+So: every trace ID is a correlation ID; not every correlation ID is a trace ID.
+
+### What this project uses — the command ID as a correlation ID
+
+In this project the command `ID` is used as the correlation ID. It is created at the
+"front door" (the service, when the command is first built) and threaded into every log
+line in the service, the consumer, and the retry poller. Filtering logs by one `command_id`
+reconstructs that command's whole journey — PENDING → PUBLISHED → SENT → retries →
+ACKNOWLEDGED/DEAD — across all three components. It costs almost nothing (one `slog.With`
+per command) and gives most of the value of tracing.
+
+**Why the command ID is a natural correlation ID:** it already uniquely identifies the unit
+of work, it already exists everywhere the command goes, and it is already stored — so no new
+identifier had to be invented.
+
+### Why it is trace-like across the retry poller (not just in-process)
+
+The command ID does more than group logs inside one process — it **travels inside the Kafka
+message** from the producer to the consumer, and the retry poller re-publishes the same
+command (same ID) back onto the topic. So the ID crosses a message boundary between stages
+that could run as **separate processes** (the consumer can be scaled to multiple instances —
+see Concept 3). Because the same ID propagates across that boundary and lets a different
+process continue following the same command, it functions as a lightweight **trace ID**, not
+merely an in-process correlation ID.
+
+What this project does *not* have is a full tracing backend: there are no span IDs, no
+per-segment timing spans, and no tool like Jaeger to visualize the call tree. So the honest
+description is: the command ID is a correlation ID that also propagates through Kafka, giving
+**trace-like end-to-end visibility** with nothing but structured logging.
 
 ### Metrics worth emitting here (the plan)
 
@@ -1173,15 +1207,22 @@ Break dependency metrics out per call and per status so "the car endpoint is slo
 
 ### Key point
 
-> "Observability is three pillars: metrics for aggregate health, logs for per-request
-> detail, traces for following one request across steps. The cheapest high-value habit is
-> a correlation ID stamped at the front door and carried through every log line — in my
-> service the command ID already plays that role. For metrics I'd break them out by
-> outcome and per dependency, not one lumped error count, so the common failures surface
-> first."
+> "I use the command ID as a correlation ID, stamped at the front door and carried through
+> every log line in the service, consumer, and poller — so I can trace one command's whole
+> journey by filtering on that one field. It even propagates through the Kafka message to the
+> consumer, which may be a separate process, so it's trace-like, not just in-process. It's not
+> full distributed tracing — no span IDs or a tracing backend — but it gives the same
+> follow-one-request-end-to-end capability with just structured logging. A correlation ID is
+> the general idea; a trace ID is the version that crosses service boundaries."
 
-### What this project will add (next step — code)
+### What this project does now — structured logging
 
-Not yet implemented. The planned first steps: switch to **structured logging** (`slog`)
-with the command ID as a field on every line, then expose a **`/metrics`** endpoint with
-Prometheus counters for the outcomes above.
+Implemented: **structured logging** with `slog`, with the command ID (plus car ID and command
+type) attached as fields on every line via a per-command child logger. All three components —
+service, consumer, retry poller — log through it, so one command is traceable end to end.
+
+### Next step — metrics
+
+Not yet implemented: a **`/metrics`** endpoint with Prometheus counters for commands by
+outcome (published, acknowledged, failed, dead) and a histogram for car-send latency (the
+`send_duration_ms` already measured in the consumer's logs becomes the histogram).
