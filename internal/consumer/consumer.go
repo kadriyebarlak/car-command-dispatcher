@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -17,15 +18,17 @@ type Consumer struct {
 	car         domain.Car
 	sendTimeout time.Duration
 	logger      *slog.Logger
+	metrics     *metrics.Metrics
 }
 
-func NewConsumer(reader *kafka.Reader, repository domain.CommandRepository, car domain.Car, sendTimeout time.Duration, logger *slog.Logger) *Consumer {
+func NewConsumer(reader *kafka.Reader, repository domain.CommandRepository, car domain.Car, sendTimeout time.Duration, logger *slog.Logger, metrics *metrics.Metrics) *Consumer {
 	return &Consumer{
 		reader:      reader,
 		repository:  repository,
 		car:         car,
 		sendTimeout: sendTimeout,
 		logger:      logger,
+		metrics:     metrics,
 	}
 }
 
@@ -124,6 +127,9 @@ func (c *Consumer) process(ctx context.Context, msg kafka.Message) error {
 	err = c.car.Send(sendCtx, command)
 	sendDuration := time.Since(sendStartedAt)
 	cancel()
+
+	c.metrics.CarSendDuration.Observe(sendDuration.Seconds())
+
 	if err != nil {
 		logger.Warn(
 			"failed to send command to car",
@@ -140,6 +146,8 @@ func (c *Consumer) process(ctx context.Context, msg kafka.Message) error {
 			)
 			return fmt.Errorf("update status to FAILED: %w", updateErr)
 		}
+
+		c.metrics.CommandsTotal.WithLabelValues("failed").Inc()
 
 		logger.Info(
 			"command marked as failed",
@@ -158,6 +166,8 @@ func (c *Consumer) process(ctx context.Context, msg kafka.Message) error {
 		)
 		return fmt.Errorf("mark acknowledged and done: %w", err)
 	}
+
+	c.metrics.CommandsTotal.WithLabelValues("acknowledged").Inc()
 
 	logger.Info(
 		"command acknowledged",

@@ -1221,8 +1221,58 @@ Implemented: **structured logging** with `slog`, with the command ID (plus car I
 type) attached as fields on every line via a per-command child logger. All three components —
 service, consumer, retry poller — log through it, so one command is traceable end to end.
 
-### Next step — metrics
+### Metrics — implemented
 
-Not yet implemented: a **`/metrics`** endpoint with Prometheus counters for commands by
-outcome (published, acknowledged, failed, dead) and a histogram for car-send latency (the
-`send_duration_ms` already measured in the consumer's logs becomes the histogram).
+A `/metrics` endpoint (Prometheus, via `promhttp.Handler()`) exposes:
+
+- **`car_commands_total`** — a counter labeled by `outcome` (published, acknowledged,
+  failed, dead). One metric, sliced by label, instead of four separate counters.
+- **`car_send_duration_seconds`** — a histogram of car-send latency (the `send_duration_ms`
+  from the logs, recorded in seconds per Prometheus base-unit convention). Observed on both
+  success and failure, so a slow-failing car still shows up in the distribution.
+
+Each counter is incremented **only after the state change actually succeeds** (e.g. `failed`
+is counted after `MarkFailed` commits, not before the attempt) — so the metric reflects what
+really happened, not what was attempted.
+
+**Why `outcome` is a label but `car_id` is not.** Labels multiply time series: Prometheus
+stores one series per unique label-value combination and keeps them in memory. `outcome` has
+four possible values — cheap. `car_id` is unbounded (millions of vehicles, always growing) —
+adding it as a label would create millions of series and can OOM Prometheus. High-cardinality
+identifiers belong in **logs**, not metric labels. This is the division of labor: metrics say
+*how many*, logs say *which one*.
+
+**Counters are concurrency-safe.** Four components increment the same `CounterVec` from
+different goroutines with no mutex — the Prometheus client library makes increments atomic
+internally.
+
+### Reading the metrics — a real example
+
+After submitting 4 commands with a 90%-offline car and `maxRetries = 3`:
+```
+car_commands_total{outcome="published"}    4
+car_commands_total{outcome="failed"}       10
+car_commands_total{outcome="dead"}         3
+car_commands_total{outcome="acknowledged"} 1
+```
+
+At first glance `failed = 10` looks wrong for only 4 commands. It is not — it reveals the key
+distinction:
+
+- **`dead` and `acknowledged` are per-command** (terminal states — each happens once per command).
+  3 commands gave up → dead; 1 command caught the car online on a retry → acknowledged. 3 + 1 = 4. ✓
+- **`failed` is per-attempt** (every failed send increments it, and each command is attempted
+  multiple times). With `maxRetries = 3`, a dying command makes 3 attempts, each failing:
+  `3 dead × 3 attempts = 9`, plus 1 failed attempt from the command that eventually succeeded
+  = **10**. ✓
+
+This per-command vs per-attempt split is useful in production, not just accounting: `failed`
+measures the *retry load* an outage generates (attempt volume), while `dead` measures the
+*business impact* (commands ultimately abandoned). One lumped "errors" counter would hide both
+of those signals — which is exactly why metrics are broken out by outcome.
+
+### Still open (documented, not built)
+
+- **Retry counter** — the poller does not yet count re-publishes separately; `published` counts
+  only the first publish. A dedicated `retries` counter would make retry volume visible directly.
+- **Consumer lag, queue depth** — gauges that would show the consumer falling behind. Not yet added.

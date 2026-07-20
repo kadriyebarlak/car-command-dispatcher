@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
 )
 
 type CommandPublisher interface {
@@ -17,6 +18,7 @@ type Poller struct {
 	repository domain.CommandRepository
 	publisher  CommandPublisher
 	logger     *slog.Logger
+	metrics    *metrics.Metrics
 
 	maxRetries int
 	interval   time.Duration
@@ -32,11 +34,13 @@ func NewPoller(
 	base time.Duration,
 	cap time.Duration,
 	logger *slog.Logger,
+	metrics *metrics.Metrics,
 ) *Poller {
 	return &Poller{
 		repository: repository,
 		publisher:  publisher,
 		logger:     logger,
+		metrics:    metrics,
 		maxRetries: maxRetries,
 		interval:   interval,
 		base:       base,
@@ -145,6 +149,9 @@ func (p *Poller) runOnce(ctx context.Context) error {
 				)
 				continue
 			}
+
+			p.metrics.CommandsTotal.WithLabelValues("dead").Inc()
+
 			commandLogger.Info(
 				"command marked as dead",
 				"status", domain.CommandStatusDead,

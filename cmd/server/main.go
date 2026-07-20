@@ -15,10 +15,12 @@ import (
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/car"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/consumer"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/handler"
+	appmetrics "github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/producer"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/repository"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/retry"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/service"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -30,6 +32,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	logger.Info("car command dispatcher starting...")
+
+	appMetrics := appmetrics.New()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -56,11 +60,11 @@ func main() {
 
 	commandRepository := repository.NewPostgresCommandRepository(pool)
 	commandPublisher := producer.NewKafkaPublisher(kafkaWriter)
-	commandService := service.NewCommandService(commandRepository, commandPublisher, logger)
+	commandService := service.NewCommandService(commandRepository, commandPublisher, logger, appMetrics)
 	commandHandler := handler.NewCommandHandler(commandService, logger)
 
 	carSimulator := car.NewCarSimulator(0.9)
-	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second, logger)
+	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second, logger, appMetrics)
 	commandConsumer.Start(ctx)
 
 	// retry poller: re-publishes FAILED commands once their backoff has elapsed,
@@ -73,12 +77,14 @@ func main() {
 		1*time.Second,  // backoff base
 		30*time.Second, // backoff cap
 		logger,
+		appMetrics,
 	)
 	retryPoller.Start(ctx)
 
 	r := chi.NewRouter()
 
 	r.Post("/commands", commandHandler.CreateCommand)
+	r.Handle("/metrics", promhttp.Handler())
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

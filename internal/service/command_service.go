@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/producer"
 )
 
@@ -14,13 +15,15 @@ type CommandService struct {
 	repository domain.CommandRepository
 	publisher  producer.CommandPublisher
 	logger     *slog.Logger
+	metrics    *metrics.Metrics
 }
 
-func NewCommandService(repository domain.CommandRepository, publisher producer.CommandPublisher, logger *slog.Logger) *CommandService {
+func NewCommandService(repository domain.CommandRepository, publisher producer.CommandPublisher, logger *slog.Logger, metrics *metrics.Metrics) *CommandService {
 	return &CommandService{
 		repository: repository,
 		publisher:  publisher,
 		logger:     logger,
+		metrics:    metrics,
 	}
 }
 
@@ -71,6 +74,8 @@ func (s *CommandService) Submit(ctx context.Context, carID string, commandType d
 		)
 		return command, err
 	}
+
+	s.metrics.CommandsTotal.WithLabelValues("published").Inc()
 
 	commandLogger.Info(
 		"command published",

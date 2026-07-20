@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
+	appmetrics "github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -23,6 +24,8 @@ func newTestLogger() *slog.Logger {
 		slog.NewJSONHandler(io.Discard, nil),
 	)
 }
+
+var testMetrics = appmetrics.New()
 
 // fakeCommandRepository implements domain.CommandRepository for tests.
 // It tracks the idempotency state per command id and the latest command status,
@@ -159,7 +162,7 @@ func sampleCommand(id string) domain.RemoteCommand {
 func TestConsumer_HappyPath_AcknowledgedAndDone(t *testing.T) {
 	repo := newFakeRepo()
 	car := &fakeCar{}
-	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger())
+	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger(), testMetrics)
 
 	cmd := sampleCommand("command-ok")
 	msg := marshalMsg(t, cmd)
@@ -182,7 +185,7 @@ func TestConsumer_HappyPath_AcknowledgedAndDone(t *testing.T) {
 func TestConsumer_DoneCommandIsSkipped(t *testing.T) {
 	repo := newFakeRepo()
 	car := &fakeCar{}
-	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger())
+	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger(), testMetrics)
 
 	cmd := sampleCommand("command-dup")
 	msg := marshalMsg(t, cmd)
@@ -203,7 +206,7 @@ func TestConsumer_DoneCommandIsSkipped(t *testing.T) {
 func TestConsumer_CarOffline_MarksFailedAndCommits(t *testing.T) {
 	repo := newFakeRepo()
 	car := &fakeCar{sendErr: errors.New("car is offline")}
-	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger())
+	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger(), testMetrics)
 
 	cmd := sampleCommand("command-offline")
 	msg := marshalMsg(t, cmd)
@@ -227,7 +230,7 @@ func TestConsumer_CarOffline_MarksFailedAndCommits(t *testing.T) {
 
 func TestConsumer_FailedCommandCanBeRetried(t *testing.T) {
 	repo := newFakeRepo()
-	consumer := NewConsumer(nil, repo, &fakeCar{sendErr: errors.New("offline")}, 5*time.Second, newTestLogger())
+	consumer := NewConsumer(nil, repo, &fakeCar{sendErr: errors.New("offline")}, 5*time.Second, newTestLogger(), testMetrics)
 
 	cmd := sampleCommand("command-retry")
 	msg := marshalMsg(t, cmd)
@@ -239,7 +242,7 @@ func TestConsumer_FailedCommandCanBeRetried(t *testing.T) {
 
 	// simulate the poller re-publishing: a new consumer, car now online
 	onlineCar := &fakeCar{}
-	retryConsumer := NewConsumer(nil, repo, onlineCar, 5*time.Second, newTestLogger())
+	retryConsumer := NewConsumer(nil, repo, onlineCar, 5*time.Second, newTestLogger(), testMetrics)
 	if err := retryConsumer.process(context.Background(), msg); err != nil {
 		t.Fatalf("retry process returned error: %v", err)
 	}
@@ -257,7 +260,7 @@ func TestConsumer_TryClaimError_ReturnsErrorNoCommit(t *testing.T) {
 	repo := newFakeRepo()
 	repo.tryClaimErr = errors.New("database unavailable")
 	car := &fakeCar{}
-	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger())
+	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger(), testMetrics)
 
 	msg := marshalMsg(t, sampleCommand("command-claimfail"))
 
@@ -273,7 +276,7 @@ func TestConsumer_TryClaimError_ReturnsErrorNoCommit(t *testing.T) {
 func TestConsumer_MalformedJSON_ReturnsNil(t *testing.T) {
 	repo := newFakeRepo()
 	car := &fakeCar{}
-	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger())
+	consumer := NewConsumer(nil, repo, car, 5*time.Second, newTestLogger(), testMetrics)
 
 	msg := kafka.Message{Key: []byte("car-001"), Value: []byte("{invalid-json")}
 
@@ -288,7 +291,7 @@ func TestConsumer_MalformedJSON_ReturnsNil(t *testing.T) {
 func TestConsumer_CarTimeout_MarksFailed(t *testing.T) {
 	repo := newFakeRepo()
 	car := &slowCar{delay: 200 * time.Millisecond} // slower than the timeout
-	consumer := NewConsumer(nil, repo, car, 50*time.Millisecond, newTestLogger())
+	consumer := NewConsumer(nil, repo, car, 50*time.Millisecond, newTestLogger(), testMetrics)
 
 	msg := marshalMsg(t, sampleCommand("command-timeout"))
 
