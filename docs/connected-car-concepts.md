@@ -1271,8 +1271,35 @@ measures the *retry load* an outage generates (attempt volume), while `dead` mea
 *business impact* (commands ultimately abandoned). One lumped "errors" counter would hide both
 of those signals — which is exactly why metrics are broken out by outcome.
 
+### Metric types — all three represented
+
+The project now uses all three core Prometheus metric types, which is a clean way to see
+what each is for:
+
+- **Counter** (`car_commands_total` by outcome, `car_command_retries_total`) — only ever
+  goes up. Answers "how many happened in total." Like an odometer.
+- **Histogram** (`car_send_duration_seconds`) — distribution of measured values, bucketed.
+  Answers "how long/big were they." Lets you ask for percentiles later.
+- **Gauge** (`car_commands_pending_retries`) — goes up *and* down. Answers "how many right
+  now." Like a speedometer.
+
+### The gauge — a level, not a total
+
+`car_commands_pending_retries` is set each poll cycle to the number of commands currently in
+the FAILED backlog (`FindRetryable`'s count). It **rises** when the car goes offline and
+commands pile up, and **falls** as the poller drains them to acknowledged or dead. This
+up-and-down movement is what makes it a gauge rather than a counter.
+
+It is set with `.Set(float64(count))` — a gauge represents a current level, so you *set* it to
+the known value (the "query and set" approach), rather than `Inc`/`Dec`. The poller already
+queries the backlog every cycle, so it sets the gauge to the truth for free.
+
+Note what it measures: "commands in the FAILED backlog (failed, not yet dead)", which includes
+commands whose backoff has not elapsed yet — i.e. "in the retry pipeline", not "due this
+instant". That is the more useful operational signal, because it shows the size of the outage's
+backlog, not just what happens to be due right now.
+
 ### Still open (documented, not built)
 
-- **Retry counter** — the poller does not yet count re-publishes separately; `published` counts
-  only the first publish. A dedicated `retries` counter would make retry volume visible directly.
-- **Consumer lag, queue depth** — gauges that would show the consumer falling behind. Not yet added.
+- **Consumer lag** — a gauge showing how far behind the consumer is falling relative to
+  the Kafka high-water mark. Would need reading consumer-group offset vs latest offset. Not yet added.

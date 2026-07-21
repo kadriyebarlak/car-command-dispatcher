@@ -98,6 +98,8 @@ func (p *Poller) runOnce(ctx context.Context) error {
 		return fmt.Errorf("find retryable commands: %w", err)
 	}
 
+	p.metrics.PendingRetries.Set(float64(len(commands)))
+
 	p.logger.Info(
 		"retryable commands found",
 		"count", len(commands),
@@ -182,6 +184,8 @@ func (p *Poller) runOnce(ctx context.Context) error {
 			)
 			continue
 		}
+
+		p.metrics.RetriesTotal.Inc()
 
 		commandLogger.Info(
 			"command republished for retry",
