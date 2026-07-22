@@ -1299,7 +1299,61 @@ commands whose backoff has not elapsed yet — i.e. "in the retry pipeline", not
 instant". That is the more useful operational signal, because it shows the size of the outage's
 backlog, not just what happens to be due right now.
 
-### Still open (documented, not built)
+### Consumer lag — explained, measured externally (not self-reported)
 
-- **Consumer lag** — a gauge showing how far behind the consumer is falling relative to
-  the Kafka high-water mark. Would need reading consumer-group offset vs latest offset. Not yet added.
+**What it is.** Consumer lag is how far behind a consumer is: the gap between the newest
+offset written to a partition (the *high-water mark*) and the offset the consumer group has
+committed. Lag of 0 means fully caught up; lag of 5,000 means 5,000 messages are waiting,
+produced but not yet processed.
+
+```
+partition:  [........................|............]
+                                     ^            ^
+                          committed offset   high-water mark
+                                     |------------|
+                                        = lag (messages waiting)
+```
+
+**High-water mark, precisely.** The high-water mark is not quite "the last message" — it is
+the offset of the *next* message to be written, i.e. one past the last durably-committed
+message. It marks the newest offset that is written, replicated, and readable by consumers.
+
+```
+offset:   0    1    2    3    4    5
+        [msg][msg][msg][msg][msg][ ]
+              ^                    ^
+         committed            high-water mark
+         offset = 1           = 5
+              |----------------|
+                lag = 5 - 1 = 4 messages waiting
+```
+
+So lag is simply `high_water_mark - committed_offset` — the distance between where the
+consumer has caught up and the newest readable message.
+
+**Why it matters.** Lag is the single clearest signal that a consumer cannot keep up. A
+counter tells you how many messages you processed; lag tells you how many you are *falling
+behind* on. Rising lag means producers are outpacing consumers — you need more partitions and
+consumers, or the processing is too slow. It is the classic "is the pipeline backing up?"
+metric, and it is usually what you alert on for a streaming service.
+
+**Why this project does not self-report it.** A consumer could read its own lag from the
+client library (e.g. `reader.Lag()` in segmentio/kafka-go) and set a gauge. But self-reported
+lag has a real weakness: if the consumer is fully stuck (deadlocked, hung on a slow call, or
+crashed), it also stops updating its own lag metric — so the number that is supposed to warn
+you the consumer is stuck is itself frozen or missing. The metric fails exactly when you need
+it most.
+
+**How it is measured in production.** Lag is measured *outside* the application by a dedicated
+exporter that queries Kafka directly for each group's committed offset and each partition's
+high-water mark, then exposes the difference to Prometheus:
+
+- **kafka-exporter** (or **Burrow**) — a separate process/container that reads offsets from
+  the broker and publishes `kafka_consumergroup_lag`-style metrics per group and partition.
+- Because it runs independently of the consumer, it still reports lag correctly even when the
+  consumer is completely stuck — which is the whole point.
+
+So the honest design is: the app instruments what only the app knows (outcomes, latency,
+backlog it can see) via its own metrics; broker-level facts like consumer lag are measured by
+infrastructure that observes Kafka from the outside. This project documents lag as that
+external concern rather than shipping a weaker in-app version.
