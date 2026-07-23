@@ -1246,6 +1246,30 @@ identifiers belong in **logs**, not metric labels. This is the division of labor
 different goroutines with no mutex — the Prometheus client library makes increments atomic
 internally.
 
+### Prometheus vs Grafana — who does what
+
+These two are usually named together, but they do different jobs:
+
+- **Prometheus** — the collector and time-series database. It **pulls** (scrapes) the
+  `/metrics` endpoint on a schedule, stores each value with a timestamp, answers queries in
+  **PromQL** (e.g. `rate(car_commands_total{outcome="dead"}[5m])`), and evaluates alert rules.
+  The app never pushes; Prometheus comes and reads.
+- **Grafana** — the visualization layer. It stores **no** metrics of its own. It queries a data
+  source (Prometheus here) and draws dashboards from the answers.
+
+```
+this service          Prometheus                  Grafana
+/metrics        →     scrapes, stores,      →     queries Prometheus,
+endpoint              answers PromQL              draws dashboards
+```
+
+Prometheus can be used without Grafana (its own UI runs PromQL, just plainly); Grafana is
+useless without a data source. Grafana is also source-agnostic — it can chart Loki (logs),
+Postgres, and others, which is why it pairs with many backends, not just Prometheus.
+
+This project implements the part that matters engineering-wise: exposing well-chosen metrics
+at `/metrics`. Running Prometheus and Grafana on top is infrastructure/config, not code.
+
 ### Reading the metrics — a real example
 
 After submitting 4 commands with a 90%-offline car and `maxRetries = 3`:
