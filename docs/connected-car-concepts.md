@@ -1135,8 +1135,7 @@ https://aws.amazon.com/builders-library/instrumenting-distributed-systems-for-op
 
 A service that works is not the same as a service you can *operate*. When something goes
 wrong at 3am — commands piling up in FAILED, the poller falling behind, the car endpoint
-slow — you need to answer "what is happening and why" without guessing. Observability is
-the instrumentation that lets you measure how the system behaves from the outside.
+slow — you need to answer "what is happening and why" without guessing. Observability is the ability to understand how the system behaves from the outside, enabled by instrumentation such as logs, metrics, and traces.
 
 ### The three pillars — what each answers
 
