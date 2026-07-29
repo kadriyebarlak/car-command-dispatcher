@@ -10,6 +10,9 @@ type Metrics struct {
 	CarSendDuration prometheus.Histogram
 	RetriesTotal    prometheus.Counter // total retry re-publishes
 	PendingRetries  prometheus.Gauge   //commands currently awaiting retry
+
+	HTTPRequestsTotal   prometheus.Counter
+	HTTPRequestDuration prometheus.Histogram
 }
 
 func New() *Metrics {
@@ -38,6 +41,20 @@ func New() *Metrics {
 			prometheus.GaugeOpts{
 				Name: "car_commands_pending_retries",
 				Help: "Number of commands currently awaiting retry.",
+			},
+		),
+		HTTPRequestsTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "http_requests_total",
+				Help: "Total number of HTTP requests received.",
+			},
+		),
+
+		HTTPRequestDuration: promauto.NewHistogram(
+			prometheus.HistogramOpts{
+				Name:    "http_request_duration_seconds",
+				Help:    "Server-side duration of HTTP request handling.",
+				Buckets: prometheus.DefBuckets,
 			},
 		),
 	}

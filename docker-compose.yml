@@ -25,6 +25,13 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+  prometheus:
+    image: prom/prometheus
+    container_name: car-command-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
 volumes:
   postgres_data:

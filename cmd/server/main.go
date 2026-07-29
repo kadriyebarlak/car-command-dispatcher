@@ -48,8 +48,10 @@ func main() {
 	}
 
 	kafkaWriter := kafka.NewWriter(kafka.WriterConfig{
-		Brokers: []string{"localhost:9092"},
-		Topic:   "car-commands",
+		Brokers:   []string{"localhost:9092"},
+		Topic:     "car-commands",
+		BatchSize: 1,
+		//BatchTimeout: 10 * time.Millisecond,
 	})
 
 	kafkaReader := kafka.NewReader(kafka.ReaderConfig{
@@ -61,7 +63,7 @@ func main() {
 	commandRepository := repository.NewPostgresCommandRepository(pool)
 	commandPublisher := producer.NewKafkaPublisher(kafkaWriter)
 	commandService := service.NewCommandService(commandRepository, commandPublisher, logger, appMetrics)
-	commandHandler := handler.NewCommandHandler(commandService, logger)
+	commandHandler := handler.NewCommandHandler(commandService, logger, appMetrics)
 
 	carSimulator := car.NewCarSimulator(0.9)
 	commandConsumer := consumer.NewConsumer(kafkaReader, commandRepository, carSimulator, 5*time.Second, logger, appMetrics)

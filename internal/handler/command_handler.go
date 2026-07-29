@@ -4,20 +4,24 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/service"
 )
 
 type CommandHandler struct {
 	service *service.CommandService
 	logger  *slog.Logger
+	metrics *metrics.Metrics
 }
 
-func NewCommandHandler(service *service.CommandService, logger *slog.Logger) *CommandHandler {
+func NewCommandHandler(service *service.CommandService, logger *slog.Logger, metrics *metrics.Metrics) *CommandHandler {
 	return &CommandHandler{
 		service: service,
 		logger:  logger,
+		metrics: metrics,
 	}
 }
 
@@ -49,6 +53,15 @@ type createCommandResponse struct {
 }
 
 func (h *CommandHandler) CreateCommand(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	h.metrics.HTTPRequestsTotal.Inc()
+
+	defer func() {
+		duration := time.Since(start).Seconds()
+		h.metrics.HTTPRequestDuration.Observe(duration)
+	}()
+
 	var req createCommandRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

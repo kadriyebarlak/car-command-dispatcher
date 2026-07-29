@@ -1,3 +1,12 @@
+.PHONY: run build check \
+	kafka-topic \
+	migrate-up migrate-down migrate-status \
+	docker-up docker-down docker-stop \
+	prometheus-up prometheus-down prometheus-logs \
+	monitoring-up
+
+DB_URL := postgres://notify:notify@localhost:5432/car_commands?sslmode=disable
+
 run:
 	go run ./cmd/server
 
@@ -14,8 +23,6 @@ kafka-topic:
 		--topic car-commands \
 		--partitions 1 --replication-factor 1
 
-DB_URL=postgres://notify:notify@localhost:5432/car_commands?sslmode=disable
-
 migrate-up:
 	goose -dir migrations postgres "$(DB_URL)" up
 
@@ -28,5 +35,20 @@ migrate-status:
 docker-up:
 	docker-compose up -d postgres kafka
 
+docker-stop:
+	docker-compose stop postgres kafka
+
 docker-down:
-	docker-compose down postgres kafka
+	docker-compose down
+
+prometheus-up:
+	docker-compose up -d prometheus
+
+prometheus-down:
+	docker-compose stop prometheus
+
+prometheus-logs:
+	docker-compose logs -f prometheus
+
+monitoring-up:
+	docker-compose up -d prometheus
