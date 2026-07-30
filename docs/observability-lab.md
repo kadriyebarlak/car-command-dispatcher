@@ -1,9 +1,7 @@
 
 # Observability Lab — Hands-On Log
 
-The sections above are the conceptual notes. Below is the practical, experiment-driven
-log: each phase turns this project a little more into an observability laboratory, with
-real findings recorded as they happen.
+This section is the practical, experiment-driven log: each phase turns this project a little more into an observability laboratory, with real findings recorded as they happen.
 
 ---
 
@@ -74,7 +72,7 @@ a question ("why 1s?"), which turned into an investigation, a root cause, a fix,
 change in the metric. That loop — instrument → observe → notice → drill down → find cause → fix
 → confirm — is the core of observability engineering, and it happened on the first metric added.
 
-### War-story summary (for interviews)
+### War-story summary
 
 > "I added latency instrumentation to my Go service and immediately found a ~1-second stall on
 > command submit. I traced it to the Kafka producer batching, waiting on a `BatchTimeout` that
