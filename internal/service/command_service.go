@@ -9,7 +9,11 @@ import (
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/producer"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+var tracer = otel.Tracer("car-command-dispatcher/service")
 
 type CommandService struct {
 	repository domain.CommandRepository
@@ -28,6 +32,9 @@ func NewCommandService(repository domain.CommandRepository, publisher producer.C
 }
 
 func (s *CommandService) Submit(ctx context.Context, carID string, commandType domain.CommandType, payload string) (domain.RemoteCommand, error) {
+	ctx, span := tracer.Start(ctx, "CommandService.Submit")
+	defer span.End()
+
 	command := domain.RemoteCommand{
 		ID:         fmt.Sprintf("command-%d", time.Now().UnixNano()),
 		CarID:      carID,
@@ -36,6 +43,12 @@ func (s *CommandService) Submit(ctx context.Context, carID string, commandType d
 		Status:     domain.CommandStatusPending,
 		RetryCount: 0,
 	}
+
+	span.SetAttributes(
+		attribute.String("command.id", command.ID),
+		attribute.String("car.id", command.CarID),
+		attribute.String("command.type", string(command.Type)),
+	)
 
 	commandLogger := s.logger.With(
 		"command_id", command.ID,

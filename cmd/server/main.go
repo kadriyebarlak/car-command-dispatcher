@@ -20,8 +20,10 @@ import (
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/repository"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/retry"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/service"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
@@ -37,6 +39,17 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	shutdownTracing, err := tracing.Init(ctx, "car-command-dispatcher", "localhost:4317")
+	if err != nil {
+		logger.Error("failed to init tracing", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := shutdownTracing(context.Background()); err != nil {
+			logger.Error("failed to shut down tracing", "error", err)
+		}
+	}()
 
 	pool, err := pgxpool.New(ctx, "postgres://notify:notify@localhost:5432/car_commands?sslmode=disable")
 	if err != nil {
@@ -93,9 +106,19 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	tracedHandler := otelhttp.NewHandler(
+		r,
+		"http.server",
+		otelhttp.WithSpanNameFormatter(
+			func(_ string, req *http.Request) string {
+				return req.Method + " " + req.URL.Path
+			},
+		),
+	)
+
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: r,
+		Handler: tracedHandler,
 	}
 
 	go func() {

@@ -32,6 +32,15 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI (you open this in the browser)
+      - "4317:4317"     # OTLP gRPC (your Go app sends traces here)
+      - "4318:4318"     # OTLP HTTP (alternative send port)
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
 
 volumes:
   postgres_data:

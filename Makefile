@@ -3,6 +3,7 @@
 	migrate-up migrate-down migrate-status \
 	docker-up docker-down docker-stop \
 	prometheus-up prometheus-down prometheus-logs \
+	jaeger-up jaeger-down jaeger-logs \
 	monitoring-up
 
 DB_URL := postgres://notify:notify@localhost:5432/car_commands?sslmode=disable
@@ -50,5 +51,17 @@ prometheus-down:
 prometheus-logs:
 	docker-compose logs -f prometheus
 
+jaeger-up:
+	docker-compose up -d jaeger
+
+jaeger-down:
+	docker-compose stop jaeger
+
+jaeger-logs:
+	docker-compose logs -f jaeger
+
 monitoring-up:
-	docker-compose up -d prometheus
+	docker-compose up -d prometheus jaeger
+
+monitoring-down:
+	docker-compose stop prometheus jaeger
