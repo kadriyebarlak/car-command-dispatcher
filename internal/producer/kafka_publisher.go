@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/tracing"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
 )
 
 type CommandPublisher interface {
@@ -30,12 +32,22 @@ func (p *KafkaPublisher) Publish(ctx context.Context, command domain.RemoteComma
 		return err
 	}
 
-	start := time.Now()
-
-	err = p.writer.WriteMessages(ctx, kafka.Message{
+	// Build the message first so we can inject trace context into its headers.
+	msg := kafka.Message{
 		Key:   []byte(command.CarID),
 		Value: value,
-	})
+	}
+
+	// Inject the current trace context into the Kafka message headers.
+	// The propagator writes "traceparent" (and friends) into the headers,
+	// so the consumer can continue this same trace.
+	otel.GetTextMapPropagator().Inject(ctx,
+		tracing.NewKafkaHeaderCarrier(&msg.Headers),
+	)
+
+	start := time.Now()
+
+	err = p.writer.WriteMessages(ctx, msg)
 
 	duration := time.Since(start)
 

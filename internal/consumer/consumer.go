@@ -9,8 +9,13 @@ import (
 
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/domain"
 	"github.com/kadriyebarlak/car-command-dispatcher/internal/metrics"
+	"github.com/kadriyebarlak/car-command-dispatcher/internal/tracing"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+var tracer = otel.Tracer("car-command-dispatcher/consumer")
 
 type Consumer struct {
 	reader      *kafka.Reader
@@ -74,6 +79,16 @@ func (c *Consumer) Start(ctx context.Context) {
 }
 
 func (c *Consumer) process(ctx context.Context, msg kafka.Message) error {
+	// Extract the trace context that the producer injected into the message
+	// headers, so this consumer's spans continue the SAME trace.
+	ctx = otel.GetTextMapPropagator().Extract(ctx,
+		tracing.NewKafkaHeaderCarrier(&msg.Headers),
+	)
+
+	// Start the consumer span as a child of the extracted context.
+	ctx, span := tracer.Start(ctx, "Consumer.process")
+	defer span.End()
+
 	var command domain.RemoteCommand
 
 	if err := json.Unmarshal(msg.Value, &command); err != nil {
@@ -86,6 +101,12 @@ func (c *Consumer) process(ctx context.Context, msg kafka.Message) error {
 		)
 		return nil
 	}
+
+	span.SetAttributes(
+		attribute.String("command.id", command.ID),
+		attribute.String("car.id", command.CarID),
+		attribute.String("command.type", string(command.Type)),
+	)
 
 	logger := c.logger.With(
 		"command_id", command.ID,
