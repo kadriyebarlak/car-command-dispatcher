@@ -355,6 +355,10 @@ the design it enables, not something the single-partition setup exercises today.
 
 ## Concept 4 — Idempotency
 
+- **Making retries safe with idempotent APIs** — the source for Concepts 4 and 5 (idempotency
+  keys, why retries require idempotency, the claim-vs-proof distinction and the dual-write problem).
+  https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+
 ### The problem
 
 The chain from Concept 2: at-least-once delivery means the same command can be delivered
@@ -569,6 +573,10 @@ documented safety net.
 ---
 
 ## Concept 6 — Timeouts, retry, and backoff with jitter
+
+- **Timeouts, retries, and backoff with jitter** — the source for this concept (retry storms,
+  exponential backoff, why full jitter spreads load better than a guaranteed minimum wait).
+  https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
 
 ### Three separate concerns, often confused
 
@@ -934,21 +942,7 @@ which is fine for one instance. It is documented as the path to safe horizontal 
 > disjoint batch. It's the standard pattern for a database-backed work queue, and it
 > pairs with idempotency as defense in depth."
 
-
 ---
-
-## References
-
-Articles read while building this project, both from the Amazon Builders' Library:
-
-- **Timeouts, retries, and backoff with jitter** — the source for Concept 6 (retry storms,
-  exponential backoff, why full jitter spreads load better than a guaranteed minimum wait).
-  https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
-
-- **Making retries safe with idempotent APIs** — the source for Concepts 4 and 5 (idempotency
-  keys, why retries require idempotency, the claim-vs-proof distinction and the dual-write problem).
-  https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
-
 
 ## Concept 9 — Atomic Writes, PID Files, and Write-Ahead Logging (WAL)
 
