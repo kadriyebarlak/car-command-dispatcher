@@ -137,6 +137,32 @@ one synchronous step. The real-world versions — an async ack channel (pattern 
 telemetry-reconciliation approach from the car-sharing platform above (pattern 3) — are the
 natural extensions if the project grew toward production behaviour.
 
+### Not every command should be retried — a delivery-policy note
+
+Retry with at-least-once delivery is not automatically right for *every* command. It
+depends on the command:
+
+- **"Must run" commands (retry is correct).** Example: `START_CHARGING`. The user wants the
+  car charged by morning, so if the car is offline now, retrying 5 minutes later is exactly
+  what they want. The user is not waiting in front of the car.
+- **"Now or never" commands (retry can be wrong).** Example: an interactive `START_CLIMATE`
+  where the user is standing at the car waiting. If it fails, the user just tries again
+  themselves. Here a silent retry 10 seconds later could turn the climate on *after* the user
+  gave up — surprising and unwanted.
+
+So a real connected-car system would give different commands different delivery policies:
+some are fire-and-forget (the user sees the result and retries themselves), and some are
+guaranteed with backend retry. This project treats **all** commands the same way (guaranteed
++ retry) — a deliberate simplification.
+
+Two things soften the concern:
+
+- Retry is bounded — `maxRetries` then `DEAD`, so it is a short tolerance window (a few
+  seconds), not an indefinite background retry.
+- If the operation is idempotent on the car's side ("ensure climate is on", not "toggle"),
+  a duplicate is harmless. The dangerous case for retry is toggle-style or side-effectful
+  commands (unlock the door, take a payment), not idempotent ones.
+
 ---
 
 ## Concept 2 — Kafka
